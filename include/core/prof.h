@@ -21,7 +21,8 @@ enum prof_point {
     PROF_SMBIOS,
     PROF_GRAPHICS,  /* GOP query */
     PROF_STORAGE,   /* boot device path + BlockIo */
-    PROF_KERNEL,    /* open, read, validate and load the kernel ELF */
+    PROF_CONFIG,    /* BOOT.CFG read and parse, plus any time spent in the menu */
+    PROF_KERNEL,    /* load the entry: kernel ELF and modules (incl. failed entries) */
     PROF_PAGING,    /* arena, page tables, boot_info */
     PROF_COUNT
 };

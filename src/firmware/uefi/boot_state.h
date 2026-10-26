@@ -12,11 +12,20 @@
 #include "elf/elf.h"
 #include "core/arena.h"
 #include "arch/x86_64/paging.h"
+#include "config/config.h"
 
-#define LOADER_VERSION   "0.1.0"
-#define LOADER_VERSION_W L"0.1.0"
-#define KERNEL_PATH L"\\EFI\\MYBOOT\\KERNEL.ELF"
+#define LOADER_VERSION   "0.2.0"
+#define LOADER_VERSION_W L"0.2.0"
+#define CONFIG_PATH      CFG_DIR "BOOT.CFG"
+#define DEFAULT_KERNEL   CFG_DIR "KERNEL.ELF" /* used when there is no BOOT.CFG */
 #define KERNEL_STACK_SIZE KiB(64)
+
+struct loaded_module {
+    uint64_t    phys;   /* 0 for an empty file */
+    uint64_t    pages;
+    uint64_t    size;
+    const char *string; /* points into the parsed config */
+};
 
 struct boot_state {
     /* discovery results (owned by their discover_* caches) */
@@ -27,11 +36,28 @@ struct boot_state {
     const struct boot_framebuffer *fb;
     const struct boot_device      *dev;
 
+    /* configuration and the entry being loaded */
+    const struct boot_config *cfg;
+    bool                      have_cfg; /* false: built-in default entry */
+    uint32_t                  entry;    /* index into cfg->entry */
+    const char               *cmdline;  /* ASCII, cmdline_len bytes, not terminated */
+    uint32_t                  cmdline_len;
+
     /* kernel image: physically contiguous, [kphys, kphys + span) */
+    char             kpath[CFG_RESOLVED_MAX];
     struct kfile     kf;
     struct elf_image elf;
     uint64_t         kphys;
     uint64_t         kpages;
+
+    /* modules: one allocation each */
+    struct loaded_module mods[CFG_MAX_MODULES];
+    uint32_t             nmod;
+    uint64_t             mod_bytes;
+
+    /* typed ranges inside our allocations, for the kernel's memory map */
+    struct mmap_carve carve[1 + CFG_MAX_MODULES];
+    uint32_t          ncarve;
 
     /* handoff arena and what lives in it */
     struct arena           arena;
@@ -43,7 +69,7 @@ struct boot_state {
     struct boot_info      *bi;
     struct boot_mem_entry *mmap;
     uint32_t               mmap_cap;
-    uint32_t               cmdline_len;
+    struct boot_module    *bmods;
     uint64_t               gdtr_virt;
     uint64_t               stack_top_virt;
 

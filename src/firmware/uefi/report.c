@@ -243,7 +243,20 @@ void report_summary(const struct boot_state *s)
     if (dev->removable)
         con_puts(L", removable");
 
-    con_puts(L"\r\nKernel         : " KERNEL_PATH L", ");
+    con_puts(L"\r\nBoot entry     : ");
+    if (s->have_cfg) {
+        con_put_dec(s->entry + 1);
+        con_puts(L" of ");
+        con_put_dec(s->cfg->nentries);
+        con_puts(L", ");
+        con_put_ascii(s->cfg->entry[s->entry].title, CFG_TITLE_MAX);
+    } else {
+        con_puts(L"built-in default (no usable BOOT.CFG)");
+    }
+
+    con_puts(L"\r\nKernel         : ");
+    con_put_ascii(s->kpath, CFG_RESOLVED_MAX);
+    con_puts(L", ");
     put_kib(s->kf.size);
     con_puts(L", ");
     con_put_dec(s->elf.nseg);
@@ -255,15 +268,31 @@ void report_summary(const struct boot_state *s)
     con_put_hex(s->kphys);
     con_puts(L", ");
     put_kib(s->elf.vend - s->elf.vbase);
+    con_puts(L"\r\nModules        : ");
+    con_put_dec(s->nmod);
+    if (s->nmod) {
+        con_puts(L", ");
+        put_kib(s->mod_bytes);
+    }
+#if BOOT_DEBUG
+    for (uint32_t i = 0; i < s->nmod; i++) {
+        con_puts(L"\r\n  module       : ");
+        con_put_ascii(s->mods[i].string, BOOT_MODULE_STRING_MAX);
+        con_puts(L", ");
+        con_put_dec(s->mods[i].size);
+        con_puts(L" bytes at ");
+        con_put_hex(s->mods[i].phys);
+    }
+#endif
     con_puts(L"\r\nDisk reads     : ");
-    con_put_dec(s->kf.reads);
+    con_put_dec(g_file_stats.reads);
     con_puts(L" reads, ");
-    con_put_dec(s->kf.bytes);
-    con_puts(L" bytes");
+    con_put_dec(g_file_stats.bytes);
+    con_puts(L" bytes (config, kernel, modules)");
 
     con_puts(L"\r\nCommand line   : ");
     if (s->cmdline_len)
-        con_put_ascii((const char *)(uintptr_t)s->bi->cmdline, s->cmdline_len);
+        con_put_ascii(s->cmdline, s->cmdline_len);
     else
         con_puts(L"(none)");
 
@@ -287,7 +316,7 @@ void report_summary(const struct boot_state *s)
         static const CHAR16 *const names[PROF_COUNT] = {
             [PROF_CPU] = L"cpu", [PROF_TSC_CAL] = L"tsc-cal", [PROF_MEMORY] = L"memory",
             [PROF_ACPI] = L"acpi", [PROF_SMBIOS] = L"smbios", [PROF_GRAPHICS] = L"gop",
-            [PROF_STORAGE] = L"storage", [PROF_KERNEL] = L"kernel", [PROF_PAGING] = L"handoff-prep",
+            [PROF_STORAGE] = L"storage", [PROF_CONFIG] = L"config", [PROF_KERNEL] = L"kernel", [PROF_PAGING] = L"handoff-prep",
         };
         con_puts(L"\r\nTimings        :");
         for (unsigned i = 1; i < PROF_COUNT; i++) {

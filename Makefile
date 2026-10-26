@@ -1,11 +1,14 @@
 # MYBOOT build. Run from Git Bash (recipes use POSIX sh).
 #
-#   make [CONFIG=debug|balanced|release]   build BOOTX64.EFI + test kernel into the ESP
+#   make [CONFIG=debug|balanced|release]   build BOOTX64.EFI + test kernel, BOOT.CFG
+#                                          and self-test module into the ESP
 #   make configs                           build all three configurations
 #   make size                              byte size of every built config
 #   make run                               boot the ESP in QEMU + OVMF (window + serial)
 #   make test                              headless boot; passes iff the test kernel
 #                                          reports every check passed
+#   make test-all                          every scenario in tests/run.sh: config,
+#                                          fallback, menu, broken kernels
 #   make run-gdb                           like run, paused, gdbstub on :1234
 #   make iso                               build/$(CONFIG)/myboot.iso (UEFI, hybrid CD/USB)
 #   make run-iso                           boot that ISO in QEMU as a CD-ROM
@@ -16,6 +19,8 @@ BUILD  := build/$(CONFIG)
 ESP    := $(BUILD)/esp
 EFI    := $(ESP)/EFI/BOOT/BOOTX64.EFI
 ESP_KERNEL := $(ESP)/EFI/MYBOOT/KERNEL.ELF
+ESP_CFG    := $(ESP)/EFI/MYBOOT/BOOT.CFG
+ESP_MOD    := $(ESP)/EFI/MYBOOT/SELFTEST.MOD
 
 CC    := clang
 LD    := lld-link
@@ -71,6 +76,8 @@ SRCS := src/firmware/uefi/entry.c \
         src/firmware/uefi/discover.c \
         src/firmware/uefi/file.c \
         src/firmware/uefi/report.c \
+        src/firmware/uefi/menu.c \
+        src/config/config.c \
         src/cpu/cpu.c \
         src/memory/memmap.c \
         src/acpi/acpi.c \
@@ -96,8 +103,8 @@ HOSTCC ?= gcc
 MKISO  := build/tools/mkiso.exe
 ISO    := $(BUILD)/myboot.iso
 
-.PHONY: all configs size run run-gdb test iso run-iso clean
-all: $(EFI) $(ESP_KERNEL)
+.PHONY: all configs size run run-gdb test test-all iso run-iso clean
+all: $(EFI) $(ESP_KERNEL) $(ESP_CFG) $(ESP_MOD)
 
 $(BUILD)/obj/%.obj: %.c Makefile
 	@mkdir -p $(dir $@)
@@ -126,12 +133,21 @@ $(ESP_KERNEL): $(KERNEL)
 	@mkdir -p $(dir $@)
 	cp $< $@
 
+$(ESP_CFG): kernel/boot.cfg
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+$(ESP_MOD): kernel/selftest.mod
+	@mkdir -p $(dir $@)
+	cp $< $@
+
 $(MKISO): tools/mkiso.c
 	@mkdir -p $(dir $@)
 	$(HOSTCC) -O2 -Wall -Wextra -o $@ $<
 
-$(ISO): $(EFI) $(KERNEL) $(MKISO)
-	$(MKISO) $@ EFI/BOOT/BOOTX64.EFI=$(EFI) EFI/MYBOOT/KERNEL.ELF=$(KERNEL)
+$(ISO): $(EFI) $(KERNEL) kernel/boot.cfg kernel/selftest.mod $(MKISO)
+	$(MKISO) $@ EFI/BOOT/BOOTX64.EFI=$(EFI) EFI/MYBOOT/KERNEL.ELF=$(KERNEL) \
+	  EFI/MYBOOT/BOOT.CFG=kernel/boot.cfg EFI/MYBOOT/SELFTEST.MOD=kernel/selftest.mod
 
 iso: $(ISO)
 
@@ -192,11 +208,16 @@ run-gdb: all
 	"$(QEMU)" $(QEMU_ARGS) -s -S
 
 # The kernel exits QEMU with (0x10 << 1) | 1 = 33 when every check passed.
+# stdin is /dev/null: a stray byte on the serial console would stop the
+# BOOT.CFG menu countdown and wait for a choice forever.
 test: all
 	@$(FRESH_VARS)
-	@timeout 60 "$(QEMU)" $(QEMU_ARGS) -display none; code=$$?; \
+	@timeout 60 "$(QEMU)" $(QEMU_ARGS) -display none < /dev/null; code=$$?; \
 	if [ $$code -eq 33 ]; then echo "TEST PASS ($(CONFIG))"; \
 	else echo "TEST FAIL ($(CONFIG)): qemu exit $$code"; exit 1; fi
+
+test-all: all
+	@CONFIG=$(CONFIG) QEMU="$(QEMU)" QEMU_SHARE="$(QEMU_SHARE)" QEMU_MEM=$(QEMU_MEM) sh tests/run.sh
 
 clean:
 	rm -rf build

@@ -240,7 +240,7 @@ static const char *mem_type_name(uint32_t t)
 {
     static const char *const names[] = {
         "?", "usable", "reserved", "acpi-reclaim", "acpi-nvs", "bad",
-        "loader-reclaim", "kernel", "fw-runtime", "mmio", "persistent",
+        "loader-reclaim", "kernel", "fw-runtime", "mmio", "persistent", "module",
     };
     return t < sizeof(names) / sizeof(names[0]) ? names[t] : "?";
 }
@@ -355,6 +355,102 @@ static void check_mappings(const struct boot_info *bi)
         check(fb_mapped(bi), "framebuffer mapped writable at hhdm_base + base");
 }
 
+static bool mmap_covers(const struct boot_info *bi, uint64_t base, uint64_t len, uint32_t type)
+{
+    const struct boot_mem_entry *e = (const struct boot_mem_entry *)(bi->hhdm_base + bi->mmap);
+
+    for (uint32_t i = 0; i < bi->mmap_count; i++)
+        if (e[i].type == type && base >= e[i].base && base + len <= e[i].base + e[i].length)
+            return true;
+    return false;
+}
+
+static bool str_eq(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+
+/* "modules=N" in the command line: how many modules BOOT.CFG gave this
+ * entry. -1 when absent (e.g. booted without BOOT.CFG). */
+static int expected_modules(const struct boot_info *bi)
+{
+    static const char key[] = "modules=";
+    const char *start, *p;
+
+    if (!bi->cmdline)
+        return -1;
+    start = (const char *)(bi->hhdm_base + bi->cmdline);
+    for (p = start; *p; p++) {
+        size_t i = 0;
+        if (p != start && p[-1] != ' ')
+            continue;
+        while (key[i] && p[i] == key[i])
+            i++;
+        if (!key[i] && p[i] >= '0' && p[i] <= '9')
+            return p[i] - '0';
+    }
+    return -1;
+}
+
+/* The self-test module (kernel/selftest.mod) starts with this text. */
+static const char selftest_magic[] = "MYBOOT self-test module";
+
+static void check_modules(const struct boot_info *bi)
+{
+    const struct boot_module *m = (const struct boot_module *)(bi->hhdm_base + bi->modules);
+    int want = expected_modules(bi);
+    bool placed = true, zero_tail = true, selftest_ok = true, terminated = true;
+
+    kputs("modules        : ");
+    put_dec(bi->module_count);
+    kputc('\n');
+    if (want >= 0)
+        check(bi->module_count == (uint32_t)want, "module count matches cmdline modules=");
+    if (!bi->module_count) {
+        check(bi->modules == 0, "no module array without modules");
+        return;
+    }
+    check(bi->modules && bi->module_entry_size == sizeof(struct boot_module), "module array present");
+    for (uint32_t i = 0; i < bi->module_count; i++) {
+        const uint8_t *data = (const uint8_t *)(bi->hhdm_base + m[i].base);
+        uint64_t end = (m[i].size + 0xFFF) & ~0xFFFull;
+
+        terminated = terminated && m[i].string[sizeof(m[i].string) - 1] == 0;
+        kputs("  ");
+        kputsn(m[i].string, sizeof(m[i].string));
+        kputs(" at ");
+        put_hex(m[i].base, 16);
+        kputs(", ");
+        put_dec(m[i].size);
+        kputs(" bytes\n");
+        if (!m[i].size)
+            continue;
+        if ((m[i].base & 0xFFF) || !mmap_covers(bi, m[i].base, end, BOOT_MEM_MODULE))
+            placed = false;
+        for (uint64_t b = m[i].size; b < end; b++)
+            zero_tail = zero_tail && data[b] == 0;
+        if (str_eq(m[i].string, "selftest"))
+            for (size_t k = 0; k + 1 < sizeof(selftest_magic); k++)
+                selftest_ok = selftest_ok && k < m[i].size && data[k] == (uint8_t)selftest_magic[k];
+    }
+    check(terminated, "module strings NUL-terminated");
+    check(placed, "modules page-aligned inside MODULE memory entries");
+    check(zero_tail, "module page tails zeroed");
+    check(selftest_ok, "self-test module content intact");
+}
+
+static void check_efi_mmap(const struct boot_info *bi)
+{
+    if (!(bi->flags & BOOT_F_UEFI))
+        return;
+    check(bi->efi_mmap && bi->efi_mmap_size && bi->efi_mmap_desc_size >= 40 &&
+          bi->efi_mmap_size % bi->efi_mmap_desc_size == 0 &&
+          mmap_covers(bi, bi->efi_mmap & ~0xFFFull, 0x1000, BOOT_MEM_BOOTLOADER_RECLAIMABLE),
+          "raw EFI memory map present, in loader-reclaimable memory");
+}
+
 static void check_firmware_tables(const struct boot_info *bi)
 {
     if (bi->acpi_rsdp) {
@@ -411,6 +507,15 @@ static void print_info(const struct boot_info *bi, uint64_t tsc_kernel)
     }
     kputs("\ncmdline        : ");
     kputs(bi->cmdline ? (const char *)(bi->hhdm_base + bi->cmdline) : "(none)");
+    kputs("\nboot entry     : ");
+    if (bi->boot_entry) {
+        put_dec(bi->boot_entry);
+        kputs(" (");
+        kputsn(bi->boot_entry_title, sizeof(bi->boot_entry_title));
+        kputs(")");
+    } else {
+        kputs("none (no BOOT.CFG)");
+    }
     kputs("\nloader reads   : ");
     put_dec(bi->loader_reads);
     kputs(" reads, ");
@@ -452,6 +557,8 @@ __attribute__((noreturn)) void kmain(const struct boot_info *bi, uint64_t entry_
         check_mappings(bi);
         check_memory_map(bi);
         check_firmware_tables(bi);
+        check_modules(bi);
+        check_efi_mmap(bi);
     }
     con_cur = g_fail ? COL_FAIL : COL_OK;
     kputs("kernel: ");

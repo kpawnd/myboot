@@ -1,5 +1,5 @@
 /*
- * Kernel file access through the firmware's Simple File System on the
+ * File access (config, kernel, modules) through the firmware's Simple File System on the
  * volume the loader came from (UEFI 2.10 sections 13.4-13.5). No FAT code
  * of our own runs on the UEFI path.
  *
@@ -10,17 +10,29 @@
 
 static EFI_GUID guid_sfs = {0x964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 
-EFI_STATUS kfile_open(struct kfile *kf, const CHAR16 *path)
+struct file_stats g_file_stats;
+
+EFI_STATUS kfile_open(struct kfile *kf, const char *path)
 {
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs;
+    CHAR16 wpath[CFG_RESOLVED_MAX];
     EFI_STATUS s;
+    size_t i;
+
+    /* ASCII to UTF-16: config paths are validated printable ASCII. */
+    for (i = 0; path[i]; i++) {
+        if (i + 1 == CFG_RESOLVED_MAX)
+            return EFI_INVALID_PARAMETER;
+        wpath[i] = (uint8_t)path[i];
+    }
+    wpath[i] = 0;
 
     s = g_uefi.bs->HandleProtocol(g_uefi.li->DeviceHandle, &guid_sfs, (void **)&fs);
     if (EFI_ERROR(s))
         return s;
     if ((s = fs->OpenVolume(fs, &kf->root)) != EFI_SUCCESS)
         return EFI_ERROR(s) ? s : EFI_LOAD_ERROR;
-    s = kf->root->Open(kf->root, &kf->file, (CHAR16 *)path, EFI_FILE_MODE_READ, 0);
+    s = kf->root->Open(kf->root, &kf->file, wpath, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(s)) {
         kf->file = 0;
         return s;
@@ -50,8 +62,8 @@ EFI_STATUS kfile_read(struct kfile *kf, uint64_t offset, void *dst, uint64_t len
             return s;
         if (got == 0 || got > len)
             return EFI_VOLUME_CORRUPTED;
-        kf->reads++;
-        kf->bytes += got;
+        g_file_stats.reads++;
+        g_file_stats.bytes += got;
         p += got;
         len -= got;
     }

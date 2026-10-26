@@ -12,7 +12,13 @@
  *   p_paddr is ignored: the loader chooses the physical location, keeping
  *   the whole image physically contiguous (phys = virt - kernel_virt_base +
  *   kernel_phys_base) and honouring p_align up to 2 MiB.
- *   File placed at \EFI\MYBOOT\KERNEL.ELF on the boot volume.
+ *   Loaded from the path \EFI\MYBOOT\BOOT.CFG names (include/config/config.h),
+ *   or from \EFI\MYBOOT\KERNEL.ELF when there is no BOOT.CFG.
+ *
+ * Compatibility
+ *   Fields are only ever appended. `size` is how many bytes of boot_info the
+ *   loader filled: check that it covers a field before reading it. `version`
+ *   changes only for an incompatible change, which a kernel must reject.
  *
  * Machine state at kernel entry
  *   64-bit long mode, CPL 0, interrupts disabled, no IDT loaded (install one
@@ -45,8 +51,17 @@
  *
  * Pointers inside boot_info are PHYSICAL addresses (0 = absent); add
  * hhdm_base to dereference them. All referenced memory lies in entries of
- * type BOOT_MEM_BOOTLOADER_RECLAIMABLE, except firmware tables (ACPI,
- * SMBIOS), which stay where firmware put them.
+ * type BOOT_MEM_BOOTLOADER_RECLAIMABLE, except module contents
+ * (BOOT_MEM_MODULE) and firmware tables (ACPI, SMBIOS, the UEFI system
+ * table), which stay where firmware put them.
+ *
+ * UEFI runtime services
+ *   efi_mmap is the firmware's own final memory map, exactly as
+ *   GetMemoryMap returned it before ExitBootServices (the kernel and modules
+ *   appear in it as EfiLoaderData). To call runtime services from the
+ *   kernel's own page tables, fill in VirtualStart of each descriptor with
+ *   EFI_MEMORY_RUNTIME set and pass this array to SetVirtualAddressMap. It is
+ *   in writable HHDM memory for that purpose.
  */
 #ifndef BOOTINFO_BOOTINFO_H
 #define BOOTINFO_BOOTINFO_H
@@ -78,7 +93,8 @@ enum boot_mem_type {
     BOOT_MEM_KERNEL = 7,                 /* the loaded kernel image */
     BOOT_MEM_FIRMWARE_RUNTIME = 8,       /* UEFI runtime services code/data */
     BOOT_MEM_MMIO = 9,                   /* firmware-declared MMIO */
-    BOOT_MEM_PERSISTENT = 10             /* NVDIMM / persistent memory */
+    BOOT_MEM_PERSISTENT = 10,            /* NVDIMM / persistent memory */
+    BOOT_MEM_MODULE = 11                 /* module contents; free once consumed */
 };
 
 /* boot_mem_entry.flags */
@@ -189,6 +205,17 @@ struct boot_device {
     uint8_t  partition_guid[16];  /* GPT unique partition GUID, or MBR signature */
 };
 
+/* A file loaded for the kernel ("module" line in BOOT.CFG): an initrd, a
+ * driver, a font. Each module has its own page-aligned allocation; the
+ * bytes after `size` up to the page end are zero. */
+#define BOOT_MODULE_STRING_MAX 111
+struct boot_module {
+    uint64_t base;        /* physical, 4 KiB aligned; 0 if size is 0 */
+    uint64_t size;        /* bytes: the file size */
+    char     string[112]; /* NUL-terminated ASCII: the string given in BOOT.CFG,
+                             else the path as written there */
+};
+
 struct boot_info {
     uint64_t magic;               /* BOOT_INFO_MAGIC */
     uint32_t version;             /* BOOT_INFO_VERSION */
@@ -222,6 +249,16 @@ struct boot_info {
     struct boot_cpu         cpu;
     struct boot_framebuffer framebuffer;
     struct boot_device      boot_device;
+    uint64_t modules;             /* phys of struct boot_module[module_count], 0 if none */
+    uint32_t module_count;
+    uint32_t module_entry_size;   /* sizeof(struct boot_module); stride */
+    uint64_t efi_mmap;            /* phys of the raw EFI memory map, 0 on BIOS */
+    uint64_t efi_mmap_size;       /* bytes */
+    uint32_t efi_mmap_desc_size;  /* stride; may exceed sizeof(EFI_MEMORY_DESCRIPTOR) */
+    uint32_t efi_mmap_desc_version;
+    uint32_t boot_entry;          /* 1-based BOOT.CFG entry booted; 0 = no BOOT.CFG */
+    uint32_t reserved;
+    char     boot_entry_title[64]; /* ASCII, NUL-terminated; empty without BOOT.CFG */
 };
 
 /* ABI verification. A change here is a protocol version change. */
@@ -241,6 +278,10 @@ _Static_assert(offsetof(struct boot_info, firmware_vendor) == 160, "boot_info.fi
 _Static_assert(offsetof(struct boot_info, cpu) == 208, "boot_info.cpu");
 _Static_assert(offsetof(struct boot_info, framebuffer) == 328, "boot_info.framebuffer");
 _Static_assert(offsetof(struct boot_info, boot_device) == 368, "boot_info.boot_device");
-_Static_assert(sizeof(struct boot_info) == 416, "boot_info");
+_Static_assert(sizeof(struct boot_module) == 128, "boot_module");
+_Static_assert(offsetof(struct boot_info, modules) == 416, "boot_info.modules");
+_Static_assert(offsetof(struct boot_info, efi_mmap) == 432, "boot_info.efi_mmap");
+_Static_assert(offsetof(struct boot_info, boot_entry) == 456, "boot_info.boot_entry");
+_Static_assert(sizeof(struct boot_info) == 528, "boot_info");
 
 #endif

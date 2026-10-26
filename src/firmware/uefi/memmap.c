@@ -125,30 +125,34 @@ static void emit(struct boot_mem_entry *out, uint32_t *n, uint32_t cap,
     }
 }
 
-uint32_t uefi_mmap_normalize(const struct uefi_mmap *m, struct boot_mem_entry *out,
-                             uint32_t cap, uint64_t kbase, uint64_t ksize)
+uint32_t uefi_mmap_normalize(const struct uefi_mmap *m, struct boot_mem_entry *out, uint32_t cap,
+                             const struct mmap_carve *carve, uint32_t ncarve)
 {
     uint32_t count = uefi_mmap_count(m), n = 0;
-    uint64_t kend = kbase + ksize;
 
     for (uint32_t i = 0; i < count; i++) {
         const EFI_MEMORY_DESCRIPTOR *d = uefi_mmap_desc(m, i);
-        uint64_t start = d->PhysicalStart, end = desc_end(d);
+        uint64_t pos = d->PhysicalStart, end = desc_end(d);
         uint32_t type = boot_type(d->Type), flags = boot_flags(d->Attribute);
 
         if (!end)
             continue;
-        if (type == BOOT_MEM_BOOTLOADER_RECLAIMABLE && start < kend && kbase < end) {
-            /* The kernel is ordinary EfiLoaderData to firmware (custom
-             * memory types break some firmware), so carve it out here. */
-            uint64_t ks = kbase > start ? kbase : start;
-            uint64_t ke = kend < end ? kend : end;
-            emit(out, &n, cap, start, ks, type, flags);
-            emit(out, &n, cap, ks, ke, BOOT_MEM_KERNEL, flags);
-            emit(out, &n, cap, ke, end, type, flags);
-        } else {
-            emit(out, &n, cap, start, end, type, flags);
+        /* The kernel and modules are ordinary EfiLoaderData to firmware
+         * (custom memory types break some firmware), so carve them out
+         * here. One descriptor can hold several carves when firmware
+         * merged adjacent allocations. */
+        if (type == BOOT_MEM_BOOTLOADER_RECLAIMABLE) {
+            for (uint32_t c = 0; c < ncarve; c++) {
+                uint64_t cs = carve[c].base > pos ? carve[c].base : pos;
+                uint64_t ce = carve[c].end < end ? carve[c].end : end;
+                if (cs >= ce)
+                    continue;
+                emit(out, &n, cap, pos, cs, type, flags);
+                emit(out, &n, cap, cs, ce, carve[c].type, flags);
+                pos = ce;
+            }
         }
+        emit(out, &n, cap, pos, end, type, flags);
     }
     return n;
 }

@@ -40,6 +40,7 @@ typedef struct {
 #define EFI_INVALID_PARAMETER  (EFI_ERROR_BIT | 2)
 #define EFI_UNSUPPORTED        (EFI_ERROR_BIT | 3)
 #define EFI_BUFFER_TOO_SMALL   (EFI_ERROR_BIT | 5)
+#define EFI_NOT_READY          (EFI_ERROR_BIT | 6)
 #define EFI_OUT_OF_RESOURCES   (EFI_ERROR_BIT | 9)
 #define EFI_VOLUME_CORRUPTED   (EFI_ERROR_BIT | 10)
 #define EFI_NOT_FOUND          (EFI_ERROR_BIT | 14)
@@ -117,7 +118,8 @@ typedef struct {
     EFI_STATUS (EFIAPI *ExitBootServices)(EFI_HANDLE ImageHandle, UINTN MapKey);
     void *GetNextMonotonicCount;
     EFI_STATUS (EFIAPI *Stall)(UINTN Microseconds);
-    void *SetWatchdogTimer;
+    EFI_STATUS (EFIAPI *SetWatchdogTimer)(UINTN Timeout, uint64_t WatchdogCode, UINTN DataSize,
+                                          CHAR16 *WatchdogData);
     void *ConnectController;
     void *DisconnectController;
     void *OpenProtocol;
@@ -149,6 +151,20 @@ struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     void *Mode;
 };
 
+/* 12.3 EFI_SIMPLE_TEXT_INPUT_PROTOCOL */
+typedef struct {
+    uint16_t ScanCode;    /* non-printing keys (arrows, F-keys); 0 otherwise */
+    CHAR16   UnicodeChar; /* 0 for non-printing keys */
+} EFI_INPUT_KEY;
+
+typedef struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
+    EFI_STATUS (EFIAPI *Reset)(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, uint8_t ExtendedVerification);
+    /* EFI_NOT_READY when no key is waiting; never blocks. */
+    EFI_STATUS (EFIAPI *ReadKeyStroke)(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key);
+    void *WaitForKey;
+};
+
 /* 4.6 EFI_CONFIGURATION_TABLE */
 typedef struct {
     EFI_GUID VendorGuid;
@@ -161,7 +177,7 @@ typedef struct {
     CHAR16                          *FirmwareVendor;
     uint32_t                         FirmwareRevision;
     EFI_HANDLE                       ConsoleInHandle;
-    void                            *ConIn;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *ConIn;
     EFI_HANDLE                       ConsoleOutHandle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE                       StandardErrorHandle;
@@ -292,6 +308,7 @@ _Static_assert(sizeof(EFI_GUID) == 16, "EFI_GUID size");
 _Static_assert(sizeof(EFI_TABLE_HEADER) == 24, "EFI_TABLE_HEADER size");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, FirmwareVendor) == 24, "ST.FirmwareVendor");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, FirmwareRevision) == 32, "ST.FirmwareRevision");
+_Static_assert(offsetof(EFI_SYSTEM_TABLE, ConIn) == 48, "ST.ConIn");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, ConOut) == 64, "ST.ConOut");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, BootServices) == 96, "ST.BootServices");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, NumberOfTableEntries) == 104, "ST.NumberOfTableEntries");
@@ -302,10 +319,13 @@ _Static_assert(offsetof(EFI_BOOT_SERVICES, GetMemoryMap) == 56, "BS.GetMemoryMap
 _Static_assert(offsetof(EFI_BOOT_SERVICES, HandleProtocol) == 152, "BS.HandleProtocol");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, ExitBootServices) == 232, "BS.ExitBootServices");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, Stall) == 248, "BS.Stall");
+_Static_assert(offsetof(EFI_BOOT_SERVICES, SetWatchdogTimer) == 256, "BS.SetWatchdogTimer");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, LocateProtocol) == 320, "BS.LocateProtocol");
 _Static_assert(sizeof(EFI_BOOT_SERVICES) == 376, "EFI_BOOT_SERVICES size");
 _Static_assert(offsetof(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL, OutputString) == 8, "ConOut.OutputString");
 _Static_assert(sizeof(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL) == 80, "ConOut size");
+_Static_assert(offsetof(EFI_SIMPLE_TEXT_INPUT_PROTOCOL, ReadKeyStroke) == 8, "ConIn.ReadKeyStroke");
+_Static_assert(sizeof(EFI_INPUT_KEY) == 4, "EFI_INPUT_KEY size");
 _Static_assert(sizeof(EFI_MEMORY_DESCRIPTOR) == 40, "EFI_MEMORY_DESCRIPTOR size");
 _Static_assert(sizeof(EFI_CONFIGURATION_TABLE) == 24, "EFI_CONFIGURATION_TABLE size");
 _Static_assert(offsetof(EFI_LOADED_IMAGE_PROTOCOL, DeviceHandle) == 24, "LI.DeviceHandle");

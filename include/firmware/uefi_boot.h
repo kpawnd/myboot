@@ -11,6 +11,7 @@
 #include "bootinfo/bootinfo.h"
 #include "acpi/acpi.h"
 #include "smbios/smbios.h"
+#include "config/config.h"
 
 struct uefi_ctx {
     EFI_HANDLE                 image;
@@ -42,10 +43,17 @@ uint32_t   uefi_mmap_count(const struct uefi_mmap *m);
 uint32_t   uefi_mmap_capacity(const struct uefi_mmap *m);
 const EFI_MEMORY_DESCRIPTOR *uefi_mmap_desc(const struct uefi_mmap *m, uint32_t i);
 int        uefi_mmap_type_at(const struct uefi_mmap *m, uint64_t addr); /* -1: not mapped */
-/* Convert to boot protocol entries, carving [kbase, kbase+ksize) out of
- * loader memory as BOOT_MEM_KERNEL. Unsorted; cannot fail. */
-uint32_t   uefi_mmap_normalize(const struct uefi_mmap *m, struct boot_mem_entry *out,
-                               uint32_t cap, uint64_t kbase, uint64_t ksize);
+/* A range of our own EfiLoaderData allocations that the kernel must see
+ * with a more specific type (the kernel image, modules). */
+struct mmap_carve {
+    uint64_t base, end;
+    uint32_t type; /* enum boot_mem_type */
+};
+/* Convert to boot protocol entries, giving each carve its type. Carves are
+ * sorted by base and do not overlap; each adds at most 2 entries. Output is
+ * unsorted; cannot fail. */
+uint32_t   uefi_mmap_normalize(const struct uefi_mmap *m, struct boot_mem_entry *out, uint32_t cap,
+                               const struct mmap_carve *carve, uint32_t ncarve);
 
 /* Discovery: each runs once, caches its result and returns it. */
 struct uefi_memory {
@@ -61,15 +69,25 @@ const struct boot_framebuffer *discover_graphics(void); /* base == 0 if absent *
 const struct boot_device      *discover_storage(void);
 bool uefi_phys_range_ok(uint64_t addr, uint64_t len);
 
-/* The kernel file. All reads go through kfile_read, which counts them. */
+/* Files on the boot volume (config, kernel, modules). Every read goes
+ * through kfile_read, which counts it in g_file_stats. */
 struct kfile {
     EFI_FILE_PROTOCOL *root, *file;
     uint64_t size;
+};
+struct file_stats {
     uint32_t reads;
     uint64_t bytes;
 };
-EFI_STATUS kfile_open(struct kfile *kf, const CHAR16 *path);
+extern struct file_stats g_file_stats;
+/* `path` is ASCII, absolute, backslash-separated (see cfg_resolve_path). */
+EFI_STATUS kfile_open(struct kfile *kf, const char *path);
 EFI_STATUS kfile_read(struct kfile *kf, uint64_t offset, void *dst, uint64_t len);
 void       kfile_close(struct kfile *kf);
+
+/* Boot menu (menu.c). Returns the 0-based entry to try first: the default
+ * at once when the timeout is 0, else the user's pick or the default once
+ * the countdown runs out. */
+uint32_t menu_choose(const struct boot_config *c);
 
 #endif
