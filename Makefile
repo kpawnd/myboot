@@ -77,6 +77,7 @@ SRCS := src/firmware/uefi/entry.c \
         src/firmware/uefi/file.c \
         src/firmware/uefi/report.c \
         src/firmware/uefi/menu.c \
+        src/firmware/uefi/error.c \
         src/config/config.c \
         src/cpu/cpu.c \
         src/memory/memmap.c \

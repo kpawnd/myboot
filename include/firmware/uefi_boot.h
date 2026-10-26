@@ -85,9 +85,39 @@ EFI_STATUS kfile_open(struct kfile *kf, const char *path);
 EFI_STATUS kfile_read(struct kfile *kf, uint64_t offset, void *dst, uint64_t len);
 void       kfile_close(struct kfile *kf);
 
-/* Boot menu (menu.c). Returns the 0-based entry to try first: the default
- * at once when the timeout is 0, else the user's pick or the default once
- * the countdown runs out. */
-uint32_t menu_choose(const struct boot_config *c);
+/* Progress lines (error.c): "<what> <path> ... " then the size, or "failed"
+ * when a boot_error comes first. */
+void     boot_progress(const CHAR16 *what, const char *path);
+void     boot_progress_done(uint64_t bytes);
+
+/* Boot errors (error.c): printed at once and kept for the menu screens. */
+#define BOOT_ERRORS_MAX 12
+#define BOOT_ERROR_LINE 200
+void     boot_error(const CHAR16 *what, const char *detail, EFI_STATUS status); /* status 0: omitted */
+void     boot_error_line(const char *file, uint32_t line, const char *msg);
+void     boot_error_more(const char *file, uint32_t count);
+uint32_t boot_errors_count(void);
+/* Draws kept errors from `row`, one per row cut to `width`; returns rows used. */
+uint32_t boot_errors_draw(uint32_t row, uint32_t max_rows, uint32_t width);
+void     boot_errors_clear(void);
+
+/* Boot menu and recovery screen (menu.c). Reboot, power off and firmware
+ * setup are carried out inside the menu and do not return. */
+enum menu_action {
+    MENU_BOOT,   /* load entry `entry` (then the others as fallbacks) */
+    MENU_RETURN  /* return to the firmware boot manager */
+};
+struct menu_choice {
+    uint32_t    action;      /* enum menu_action */
+    uint32_t    entry;       /* 0-based */
+    const char *cmdline;     /* non-NULL: edited at the menu, replaces the entry's */
+    uint32_t    cmdline_len;
+};
+/* The normal menu: shown when BOOT.CFG sets a timeout, or when a key is
+ * already waiting at this point; otherwise boots the default at once. */
+void menu_choose(const struct boot_config *c, struct menu_choice *out);
+/* After every entry failed: errors plus the menu, with a countdown that
+ * returns to the firmware. Without a keyboard it returns at once. */
+void menu_recover(const struct boot_config *c, struct menu_choice *out);
 
 #endif

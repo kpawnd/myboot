@@ -46,16 +46,55 @@ poweroff() {
     printf 'reset -s\r\n' > "$OUT/$1/startup.nsh"
 }
 
-# boot NAME: run QEMU on that ESP; sets $code, log in $OUT/NAME.log.
-boot() {
-    vars=$OUT/$1.vars.fd
+# qemu NAME CONSOLE...: run QEMU on that ESP with the given serial/monitor
+# options; the serial log goes to $OUT/NAME.log.
+qemu() {
+    name=$1
+    shift
+    vars=$OUT/$name.vars.fd
     cp "$QEMU_SHARE/edk2-i386-vars.fd" "$vars"
     timeout 90 "$QEMU" -machine q35 -m "$QEMU_MEM" -net none -no-reboot \
         -drive "if=pflash,format=raw,readonly=on,file=$QEMU_SHARE/edk2-x86_64-code.fd" \
         -drive "if=pflash,format=raw,file=$vars" \
-        -drive "if=virtio,readonly=on,format=raw,file=fat:$OUT/$1" \
+        -drive "if=virtio,readonly=on,format=raw,file=fat:$OUT/$name" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-        -display none -serial stdio < /dev/null > "$OUT/$1.log" 2>&1
+        -display none "$@"
+}
+
+# boot NAME: no keyboard input; sets $code.
+boot() {
+    qemu "$1" -serial stdio < /dev/null > "$OUT/$1.log" 2>&1
+    code=$?
+}
+
+# keys NAME KEY...: once the menu is on screen, press each KEY (a QEMU
+# 'sendkey' name: up, down, ret, backspace, spc, a, 1, ...) half a second
+# apart on the emulated keyboard, as a person would. Keys pressed earlier
+# would be dropped by the menu. Serial input is not used: QEMU for Windows
+# stalls on escape sequences (arrow keys) read from a stdin pipe.
+keys() {
+    log=$OUT/$1.log
+    shift
+    i=0
+    until [ -f "$log" ] && grep -aqF "Up/Down select" "$log"; do
+        i=$((i + 1))
+        [ "$i" -gt 900 ] && return
+        sleep 0.1
+    done
+    for k in "$@"; do
+        sleep 0.5
+        echo "sendkey $k"
+    done
+    # Keep the monitor's stdin open until QEMU exits (then echo fails).
+    while sleep 1; do
+        echo || break
+    done
+}
+
+# boot_keys NAME KEY...: like boot, pressing KEYs at the menu.
+boot_keys() {
+    name=$1
+    keys "$@" | qemu "$name" -serial "file:$OUT/$name.log" -monitor stdio > /dev/null 2>&1
     code=$?
 }
 
@@ -72,11 +111,17 @@ result() {
 
 in_log() { tr -d '\r' < "$OUT/$1.log" | grep -aqF -- "$2"; }
 
-# expect_boot NAME [TEXT...]: kernel passed all checks and the log has each TEXT.
+# expect_boot NAME [TEXT...]: kernel passed all checks and the log has each
+# TEXT. With $KEYS set (space-separated sendkey names), they are pressed at the menu.
 expect_boot() {
     name=$1
     shift
-    boot "$name"
+    if [ -n "${KEYS:-}" ]; then
+        # shellcheck disable=SC2086 # word splitting of KEYS is intended
+        boot_keys "$name" $KEYS
+    else
+        boot "$name"
+    fi
     if [ "$code" -ne 33 ]; then
         result "$name" 0 "qemu exit $code, expected 33"
         return
@@ -128,12 +173,16 @@ poke64() {
 
 echo "MYBOOT scenarios, $CONFIG build"
 
-# The shipped configuration: BOOT.CFG with a 2 s menu countdown, module.
+# The shipped configuration (BOOT.CFG with a module), with the timeout cut
+# to 1 s so the menu and its countdown run without slowing the suite.
 d=$(esp shipped)
-cp kernel/boot.cfg "$d/BOOT.CFG"
+sed 's/^timeout .*/timeout 1/' kernel/boot.cfg > "$d/BOOT.CFG"
 cp "$MODULE" "$d/SELFTEST.MOD"
 expect_boot shipped "MYBOOT boot menu" "boot entry     : 1 (Test kernel with self-test module)" \
-    "selftest at"
+    "selftest at" "Booting 'Test kernel with self-test module'" \
+    "Loading kernel \\EFI\\MYBOOT\\KERNEL.ELF ... " \
+    "Loading module \\EFI\\MYBOOT\\SELFTEST.MOD ... " \
+    "Command line: selftest modules=1" "Starting kernel ..."
 
 # No BOOT.CFG: the built-in default entry, no modules.
 esp no-config > /dev/null
@@ -165,7 +214,8 @@ kernel KERNEL.ELF
 cmdline modules=0
 EOF
 expect_boot fallback-kernel "cannot open kernel: \\EFI\\MYBOOT\\MISSING.ELF" \
-    "trying entry 2: good" "boot entry     : 2 (good)"
+    "Loading kernel \\EFI\\MYBOOT\\MISSING.ELF ... failed" \
+    "Falling back to entry 2: 'good'" "boot entry     : 2 (good)"
 
 # Fallback: the first entry's module is missing; its kernel must be freed
 # and the second entry loads cleanly.
@@ -198,13 +248,74 @@ default 7
 EOF
 expect_boot config-errors "BOOT.CFG line 1: timeout needs a number of seconds" \
     "BOOT.CFG line 2: not inside an entry" "BOOT.CFG line 4: unknown directive" \
-    "BOOT.CFG line 3: entry has no kernel line" "BOOT.CFG: 1 more errors" \
+    "BOOT.CFG line 3: entry has no kernel line" "BOOT.CFG: 1 more error(s) not shown" \
     "boot entry     : 1 (good)"
 
 # A BOOT.CFG with no usable entry falls back to the built-in default.
 d=$(esp config-empty)
 printf '# nothing here\n' > "$d/BOOT.CFG"
 expect_boot config-empty "BOOT.CFG has no usable entry" "boot entry     : none (no BOOT.CFG)"
+
+# Interactive menu. The long timeout only matters if a key is lost: the
+# default (entry 1) then boots and the case fails on the entry check.
+two_entries() {
+    cat > "$1/BOOT.CFG" <<'EOF'
+timeout 30
+entry first
+kernel KERNEL.ELF
+cmdline modules=0
+entry second
+kernel KERNEL.ELF
+cmdline modules=0
+EOF
+}
+
+d=$(esp menu-arrows)
+two_entries "$d"
+KEYS='down ret' expect_boot menu-arrows "boot entry     : 2 (second)"
+
+d=$(esp menu-digit)
+two_entries "$d"
+KEYS='2' expect_boot menu-digit "boot entry     : 2 (second)"
+
+# Edit the command line "modules=0": Backspace, retype and append, boot.
+d=$(esp menu-edit)
+two_entries "$d"
+KEYS='e backspace 0 spc e d i t e d ret' expect_boot menu-edit \
+    "cmdline        : modules=0 edited" "boot entry     : 1 (first)"
+
+# Recovery screen: every entry fails; Up twice from the first entry wraps
+# to "Power off" (above "Return to firmware"), which must shut QEMU down.
+d=$(esp recovery-poweroff)
+cat > "$d/BOOT.CFG" <<'EOF'
+entry a
+kernel A.ELF
+entry b
+kernel B.ELF
+EOF
+boot_keys recovery-poweroff up up ret
+if [ "$code" -ne 0 ]; then
+    result recovery-poweroff 0 "qemu exit $code, expected 0 (power off)"
+elif ! in_log recovery-poweroff "MYBOOT: no entry could be loaded"; then
+    result recovery-poweroff 0 "no recovery screen"
+elif in_log recovery-poweroff "Interactive Shell"; then
+    result recovery-poweroff 0 "returned to the firmware instead of powering off"
+else
+    result recovery-poweroff 1
+fi
+
+# "Return to firmware" from the normal menu: Up from the first entry.
+d=$(esp menu-return)
+two_entries "$d"
+poweroff menu-return
+boot_keys menu-return up ret
+if in_log menu-return "kernel: MYBOOT test kernel running"; then
+    result menu-return 0 "kernel ran"
+elif ! in_log menu-return "Interactive Shell"; then
+    result menu-return 0 "did not return to the firmware (qemu exit $code)"
+else
+    result menu-return 1
+fi
 
 # Broken kernels: the loader must refuse each one with a precise message.
 esp missing-kernel > /dev/null

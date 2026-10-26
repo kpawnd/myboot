@@ -62,3 +62,44 @@ void con_put_ascii(const char *s, size_t max)
         con_puts(buf);
     }
 }
+
+void con_size(uint32_t *cols, uint32_t *rows)
+{
+    UINTN c = 0, r = 0;
+
+    if (!g_con->Mode || EFI_ERROR(g_con->QueryMode(g_con, (UINTN)g_con->Mode->Mode, &c, &r)) ||
+        c < 40 || r < 10 || c > 1000 || r > 1000) {
+        c = 80;
+        r = 25;
+    }
+    *cols = (uint32_t)c;
+    *rows = (uint32_t)r;
+}
+
+void con_clear(void) { g_con->ClearScreen(g_con); }
+void con_goto(uint32_t col, uint32_t row) { g_con->SetCursorPosition(g_con, col, row); }
+void con_attr(uint32_t attr) { g_con->SetAttribute(g_con, attr); }
+/* Not every console can hide its cursor; failure is harmless. */
+void con_cursor(int visible) { g_con->EnableCursor(g_con, visible ? 1 : 0); }
+
+void con_put_field(const char *s, size_t len, size_t width)
+{
+    CHAR16 buf[65];
+    size_t n = 0;
+
+    for (size_t i = 0; i < width; i++) {
+        uint8_t c = (i < len && s[i]) ? (uint8_t)s[i] : ' ';
+        if (i < len && !s[i])
+            len = i; /* stop reading s at its NUL */
+        buf[n++] = (c >= 0x20 && c < 0x7F) ? c : L'?';
+        if (n == 64) {
+            buf[n] = 0;
+            con_puts(buf);
+            n = 0;
+        }
+    }
+    if (n) {
+        buf[n] = 0;
+        con_puts(buf);
+    }
+}

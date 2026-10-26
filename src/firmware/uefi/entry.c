@@ -72,27 +72,9 @@ static int system_table_valid(const EFI_SYSTEM_TABLE *st)
     return bs->Hdr.HeaderSize >= offsetof(EFI_BOOT_SERVICES, LocateProtocol) + sizeof(void *);
 }
 
-/* One line in every build configuration: release builds print nothing
- * else, but an error the user cannot see is useless. Status 0 is omitted. */
-static void report_error(const CHAR16 *what, const char *detail, EFI_STATUS status)
-{
-    con_puts(L"MYBOOT: error: ");
-    con_puts(what);
-    if (detail) {
-        con_puts(L": ");
-        con_put_ascii(detail, CFG_RESOLVED_MAX);
-    }
-    if (status) {
-        con_puts(L" (status ");
-        con_put_hex(status);
-        con_puts(L")");
-    }
-    con_puts(L"\r\n");
-}
-
 static EFI_STATUS entry_error(const CHAR16 *what, const char *detail, EFI_STATUS status)
 {
-    report_error(what, detail, status);
+    boot_error(what, detail, status);
     return status;
 }
 
@@ -125,7 +107,7 @@ static void release_resources(void)
  * try the next boot option. */
 static EFI_STATUS fail(const CHAR16 *what, const char *detail, EFI_STATUS status)
 {
-    report_error(what, detail, status);
+    boot_error(what, detail, status);
     release_resources();
     g_uefi.bs->Stall(FAIL_DELAY_US);
     return status;
@@ -162,18 +144,10 @@ static uint32_t load_options_cmdline(void)
 
 static void report_config_errors(void)
 {
-    for (uint32_t i = 0; i < g_cfg.nerrors && i < CFG_MAX_ERRORS; i++) {
-        con_puts(L"MYBOOT: BOOT.CFG line ");
-        con_put_dec(g_cfg.error[i].line);
-        con_puts(L": ");
-        con_put_ascii(g_cfg.error[i].msg, 80);
-        con_puts(L"\r\n");
-    }
-    if (g_cfg.nerrors > CFG_MAX_ERRORS) {
-        con_puts(L"MYBOOT: BOOT.CFG: ");
-        con_put_dec(g_cfg.nerrors - CFG_MAX_ERRORS);
-        con_puts(L" more errors\r\n");
-    }
+    for (uint32_t i = 0; i < g_cfg.nerrors && i < CFG_MAX_ERRORS; i++)
+        boot_error_line("BOOT.CFG", g_cfg.error[i].line, g_cfg.error[i].msg);
+    if (g_cfg.nerrors > CFG_MAX_ERRORS)
+        boot_error_more("BOOT.CFG", g_cfg.nerrors - CFG_MAX_ERRORS);
 }
 
 /* BOOT.CFG is optional. Without a usable one the loader boots
@@ -196,16 +170,16 @@ static void load_config(void)
     S.cfg = &g_cfg;
 
     if (s == EFI_BUFFER_TOO_SMALL)
-        report_error(L"BOOT.CFG is larger than 16 KiB; ignored", NULL, 0);
+        boot_error(L"BOOT.CFG is larger than 16 KiB; ignored", NULL, 0);
     else if (EFI_ERROR(s) && s != EFI_NOT_FOUND)
-        report_error(L"cannot read BOOT.CFG", NULL, s);
+        boot_error(L"cannot read BOOT.CFG", NULL, s);
     if (!EFI_ERROR(s)) {
         report_config_errors();
         if (g_cfg.nentries) {
             S.have_cfg = true;
             return;
         }
-        report_error(L"BOOT.CFG has no usable entry; using \\EFI\\MYBOOT\\KERNEL.ELF", NULL, 0);
+        boot_error(L"BOOT.CFG has no usable entry; using \\EFI\\MYBOOT\\KERNEL.ELF", NULL, 0);
     }
 
     memset(&g_cfg, 0, sizeof(g_cfg));
@@ -233,13 +207,16 @@ static EFI_STATUS load_kernel(const char *path)
 
     if (!cfg_resolve_path(path, S.kpath))
         return entry_error(L"kernel path too long", path, EFI_INVALID_PARAMETER);
+    boot_progress(L"Loading kernel", S.kpath);
     if (EFI_ERROR(s = kfile_open(&S.kf, S.kpath)))
         return entry_error(L"cannot open kernel", S.kpath, s);
     hdr_len = S.kf.size < sizeof(g_hdr_buf) ? S.kf.size : sizeof(g_hdr_buf);
     if (EFI_ERROR(s = kfile_read(&S.kf, 0, g_hdr_buf, hdr_len)))
         return entry_error(L"kernel read failed", S.kpath, s);
-    if ((e = elf_parse(g_hdr_buf, hdr_len, S.kf.size, &S.elf)) != ELF_OK)
-        return entry_error(L"invalid kernel", elf_strerror(e), EFI_LOAD_ERROR);
+    if ((e = elf_parse(g_hdr_buf, hdr_len, S.kf.size, &S.elf)) != ELF_OK) {
+        boot_error(L"invalid kernel", elf_strerror(e), 0); /* the reason says it all */
+        return EFI_LOAD_ERROR;
+    }
 
     /* Over-allocate by (align - 4 KiB) so a block with the right physical
      * alignment exists inside, then give back the unused head and tail. */
@@ -268,6 +245,7 @@ static EFI_STATUS load_kernel(const char *path)
     }
     memset((void *)(uintptr_t)cursor, 0, kend - cursor);
     kfile_close(&S.kf);
+    boot_progress_done(S.kf.size);
     return EFI_SUCCESS;
 }
 
@@ -282,6 +260,7 @@ static EFI_STATUS load_module(const struct cfg_module *m)
 
     if (!cfg_resolve_path(m->path, path))
         return entry_error(L"module path too long", m->path, EFI_INVALID_PARAMETER);
+    boot_progress(L"Loading module", path);
     if (EFI_ERROR(s = kfile_open(&f, path))) {
         kfile_close(&f);
         return entry_error(L"cannot open module", path, s);
@@ -308,6 +287,7 @@ static EFI_STATUS load_module(const struct cfg_module *m)
         return entry_error(L"module read failed", path, s);
     memset((void *)(uintptr_t)(lm->phys + lm->size), 0, lm->pages * PAGE_SIZE - lm->size);
     S.mod_bytes += lm->size;
+    boot_progress_done(lm->size);
     return EFI_SUCCESS;
 }
 
@@ -325,6 +305,43 @@ static EFI_STATUS load_entry(uint32_t idx)
     S.cmdline = e->cmdline;
     S.cmdline_len = e->cmdline ? e->cmdline_len : 0;
     return EFI_SUCCESS;
+}
+
+/* The chosen entry (with its command line as edited at the menu), then
+ * every other entry in order. Stops at the first that loads. */
+static EFI_STATUS load_entries(const struct menu_choice *c)
+{
+    EFI_STATUS s = EFI_LOAD_ERROR;
+
+    for (uint32_t i = 0; i < g_cfg.nentries; i++) {
+        uint32_t idx = (c->entry + i) % g_cfg.nentries;
+        const struct cfg_entry *e = &g_cfg.entry[idx];
+
+        if (i) {
+            con_puts(L"Falling back to entry ");
+            con_put_dec(idx + 1);
+            con_puts(L": ");
+        } else {
+            con_puts(L"Booting ");
+        }
+        con_puts(L"'");
+        con_put_ascii(e->title[0] ? e->title : e->kernel, CFG_PATH_MAX);
+        con_puts(L"'\r\n");
+        if (!EFI_ERROR(s = load_entry(idx))) {
+            if (i == 0 && c->cmdline) {
+                S.cmdline = c->cmdline;
+                S.cmdline_len = c->cmdline_len;
+            }
+            if (S.cmdline_len) {
+                con_puts(L"Command line: ");
+                con_put_ascii(S.cmdline, S.cmdline_len);
+                con_puts(L"\r\n");
+            }
+            return EFI_SUCCESS;
+        }
+        release_entry();
+    }
+    return s;
 }
 
 static void copy_vendor(char *dst, size_t cap, const CHAR16 *src)
@@ -535,7 +552,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* First instruction of our code: the reference point for all timings. */
     uint64_t tsc_entry = rdtsc();
     EFI_STATUS s = EFI_LOAD_ERROR;
-    uint32_t n, first;
+    struct menu_choice choice;
+    uint32_t n;
 
     /* Without a valid table there is no console to report on: hand the
      * failure back to the firmware boot manager. */
@@ -571,26 +589,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     PROF_MARK(PROF_STORAGE);
 
     load_config();
-    first = menu_choose(&g_cfg);
+    menu_choose(&g_cfg, &choice);
     PROF_MARK(PROF_CONFIG);
 
-    /* The chosen entry first, then the others in order as fallbacks. */
-    for (uint32_t i = 0; i < g_cfg.nentries; i++) {
-        uint32_t idx = (first + i) % g_cfg.nentries;
-
-        if (i) {
-            con_puts(L"MYBOOT: trying entry ");
-            con_put_dec(idx + 1);
-            con_puts(L": ");
-            con_put_ascii(g_cfg.entry[idx].title, CFG_TITLE_MAX);
-            con_puts(L"\r\n");
-        }
-        if (!EFI_ERROR(s = load_entry(idx)))
-            break;
-        release_entry();
+    /* Until an entry loads: the chosen one, then the others in order as
+     * fallbacks; if all fail, the recovery screen picks again or gives up. */
+    while (choice.action == MENU_BOOT && EFI_ERROR(s = load_entries(&choice))) {
+        menu_recover(&g_cfg, &choice);
+        boot_errors_clear();
     }
-    if (EFI_ERROR(s))
-        return fail(g_cfg.nentries > 1 ? L"no entry could be loaded" : L"cannot boot", NULL, s);
+    if (choice.action == MENU_RETURN) {
+        release_resources();
+        return EFI_ERROR(s) ? s : EFI_ABORTED;
+    }
     PROF_MARK(PROF_KERNEL);
     if (EFI_ERROR(s = prepare_handoff(tsc_entry)))
         return s;
@@ -599,6 +610,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 #if BOOT_LOG
     report_summary(&S);
 #endif
+    con_puts(L"Starting kernel ...\r\n"); /* the last output before firmware exits */
 
     if (EFI_ERROR(s = exit_firmware()))
         return s;

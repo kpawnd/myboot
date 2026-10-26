@@ -61,9 +61,43 @@ cmdline root=/dev/nvme0n1p2
   ELF, out of memory), the loader frees what it loaded and tries the next
   entry, then the rest in order. Keep a known-good kernel as the last entry.
 - A line the loader cannot use is reported with its line number and skipped.
-  The rest of the file still works.
-- Menu keys: `1`-`9` boot that entry, Enter boots the default, and any other
-  key stops the countdown.
+  The rest of the file still works. The errors also appear at the top of the
+  menu.
+
+## The menu
+
+```
+MYBOOT boot menu
+
+  1) My kernel                          <- highlighted selection
+  2) Known-good kernel
+
+     Firmware setup                     (only if the firmware supports it)
+     Reboot
+     Power off
+     Return to firmware
+
+Up/Down select, Enter boot, e edit command line, 1-9 boot that entry
+
+Booting the selected entry in 10 s. Press any key to stop.
+```
+
+- **Up/Down, Home/End** move the selection. **Enter** activates it. **1-9**
+  boot that entry at once. Any key stops the countdown.
+- **e** edits the selected entry's command line before booting it: Left,
+  Right, Home and End move the cursor, and Backspace and Delete erase. Enter
+  boots with the edited line and Esc goes back. The change applies to this
+  boot only.
+- **Firmware setup** reboots into the firmware's own settings, using the UEFI
+  OsIndications variable. **Return to firmware** hands control back to the
+  firmware's boot manager, which tries the next boot option.
+- With `timeout 0` there is no menu. To get it anyway, tap any key while the
+  machine starts.
+- **Recovery screen:** if every entry fails to load, the loader shows the
+  errors and the same menu. You can retry an entry, edit its command line,
+  open firmware setup, reboot or power off. After 10 s without a key it
+  returns to the firmware, so an unattended machine still moves on to its
+  next boot option.
 
 ## Running it on a real PC
 

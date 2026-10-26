@@ -3,7 +3,8 @@
  *
  * Plain ASCII, one directive per line, '#' starts a comment line:
  *
- *   timeout 3                 seconds the menu waits; 0 = no menu (default)
+ *   timeout 3                 seconds the menu waits; 0 = no menu unless a
+ *                             key is pressed during startup (default)
  *   default 2                 1-based entry to boot (default 1)
  *   entry Debug kernel        starts an entry; the rest of the line is its title
  *   kernel KERNEL.ELF         the kernel to load (required in every entry)

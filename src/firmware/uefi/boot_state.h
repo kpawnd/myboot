@@ -14,8 +14,8 @@
 #include "arch/x86_64/paging.h"
 #include "config/config.h"
 
-#define LOADER_VERSION   "0.2.0"
-#define LOADER_VERSION_W L"0.2.0"
+#define LOADER_VERSION   "0.3.0"
+#define LOADER_VERSION_W L"0.3.0"
 #define CONFIG_PATH      CFG_DIR "BOOT.CFG"
 #define DEFAULT_KERNEL   CFG_DIR "KERNEL.ELF" /* used when there is no BOOT.CFG */
 #define KERNEL_STACK_SIZE KiB(64)

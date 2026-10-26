@@ -44,6 +44,7 @@ typedef struct {
 #define EFI_OUT_OF_RESOURCES   (EFI_ERROR_BIT | 9)
 #define EFI_VOLUME_CORRUPTED   (EFI_ERROR_BIT | 10)
 #define EFI_NOT_FOUND          (EFI_ERROR_BIT | 14)
+#define EFI_ABORTED            (EFI_ERROR_BIT | 21)
 
 /* 4.2 EFI_TABLE_HEADER */
 typedef struct {
@@ -137,18 +138,33 @@ typedef struct {
 } EFI_BOOT_SERVICES;
 
 /* 12.4 EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL */
+#define EFI_LIGHTGRAY            0x07
+#define EFI_WHITE                0x0F
+#define EFI_BACKGROUND_LIGHTGRAY 0x70
+
+typedef struct {
+    int32_t MaxMode;
+    int32_t Mode;          /* current text mode, for QueryMode */
+    int32_t Attribute;
+    int32_t CursorColumn;
+    int32_t CursorRow;
+    uint8_t CursorVisible;
+} SIMPLE_TEXT_OUTPUT_MODE;
+
 typedef struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
 struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     void *Reset;
     EFI_STATUS (EFIAPI *OutputString)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, CHAR16 *String);
     void *TestString;
-    void *QueryMode;
+    EFI_STATUS (EFIAPI *QueryMode)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, UINTN ModeNumber,
+                                   UINTN *Columns, UINTN *Rows);
     void *SetMode;
-    void *SetAttribute;
-    void *ClearScreen;
-    void *SetCursorPosition;
-    void *EnableCursor;
-    void *Mode;
+    EFI_STATUS (EFIAPI *SetAttribute)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, UINTN Attribute);
+    EFI_STATUS (EFIAPI *ClearScreen)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This);
+    EFI_STATUS (EFIAPI *SetCursorPosition)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, UINTN Column,
+                                           UINTN Row);
+    EFI_STATUS (EFIAPI *EnableCursor)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *This, uint8_t Visible);
+    SIMPLE_TEXT_OUTPUT_MODE *Mode;
 };
 
 /* 12.3 EFI_SIMPLE_TEXT_INPUT_PROTOCOL */
@@ -157,6 +173,16 @@ typedef struct {
     CHAR16   UnicodeChar; /* 0 for non-printing keys */
 } EFI_INPUT_KEY;
 
+/* EFI_INPUT_KEY.ScanCode values (Table 12-1) */
+#define SCAN_UP     0x01
+#define SCAN_DOWN   0x02
+#define SCAN_RIGHT  0x03
+#define SCAN_LEFT   0x04
+#define SCAN_HOME   0x05
+#define SCAN_END    0x06
+#define SCAN_DELETE 0x08
+#define SCAN_ESC    0x17
+
 typedef struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
 struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
     EFI_STATUS (EFIAPI *Reset)(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, uint8_t ExtendedVerification);
@@ -164,6 +190,32 @@ struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
     EFI_STATUS (EFIAPI *ReadKeyStroke)(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key);
     void *WaitForKey;
 };
+
+/* 4.5 EFI_RUNTIME_SERVICES (8.2 variables, 8.5.1 ResetSystem) */
+#define EFI_VARIABLE_NON_VOLATILE       0x1
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x2
+#define EFI_VARIABLE_RUNTIME_ACCESS     0x4
+#define EFI_OS_INDICATIONS_BOOT_TO_FW_UI 0x1ULL
+
+enum { EfiResetCold, EfiResetWarm, EfiResetShutdown };
+
+typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    void *GetTime;
+    void *SetTime;
+    void *GetWakeupTime;
+    void *SetWakeupTime;
+    void *SetVirtualAddressMap;
+    void *ConvertPointer;
+    EFI_STATUS (EFIAPI *GetVariable)(CHAR16 *Name, EFI_GUID *Vendor, uint32_t *Attributes,
+                                     UINTN *DataSize, void *Data);
+    void *GetNextVariableName;
+    EFI_STATUS (EFIAPI *SetVariable)(CHAR16 *Name, EFI_GUID *Vendor, uint32_t Attributes,
+                                     UINTN DataSize, void *Data);
+    void *GetNextHighMonotonicCount;
+    void (EFIAPI *ResetSystem)(uint32_t ResetType, EFI_STATUS ResetStatus, UINTN DataSize,
+                               void *ResetData);
+} EFI_RUNTIME_SERVICES;
 
 /* 4.6 EFI_CONFIGURATION_TABLE */
 typedef struct {
@@ -182,7 +234,7 @@ typedef struct {
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE                       StandardErrorHandle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
-    void                            *RuntimeServices;
+    EFI_RUNTIME_SERVICES            *RuntimeServices;
     EFI_BOOT_SERVICES               *BootServices;
     UINTN                            NumberOfTableEntries;
     EFI_CONFIGURATION_TABLE         *ConfigurationTable;
@@ -310,7 +362,14 @@ _Static_assert(offsetof(EFI_SYSTEM_TABLE, FirmwareVendor) == 24, "ST.FirmwareVen
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, FirmwareRevision) == 32, "ST.FirmwareRevision");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, ConIn) == 48, "ST.ConIn");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, ConOut) == 64, "ST.ConOut");
+_Static_assert(offsetof(EFI_SYSTEM_TABLE, RuntimeServices) == 88, "ST.RuntimeServices");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, BootServices) == 96, "ST.BootServices");
+_Static_assert(offsetof(EFI_RUNTIME_SERVICES, GetVariable) == 72, "RT.GetVariable");
+_Static_assert(offsetof(EFI_RUNTIME_SERVICES, SetVariable) == 88, "RT.SetVariable");
+_Static_assert(offsetof(EFI_RUNTIME_SERVICES, ResetSystem) == 104, "RT.ResetSystem");
+_Static_assert(offsetof(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL, ClearScreen) == 48, "ConOut.ClearScreen");
+_Static_assert(offsetof(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL, Mode) == 72, "ConOut.Mode");
+_Static_assert(offsetof(SIMPLE_TEXT_OUTPUT_MODE, CursorVisible) == 20, "Mode.CursorVisible");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, NumberOfTableEntries) == 104, "ST.NumberOfTableEntries");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, ConfigurationTable) == 112, "ST.ConfigurationTable");
 _Static_assert(sizeof(EFI_SYSTEM_TABLE) == 120, "EFI_SYSTEM_TABLE size");

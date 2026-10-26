@@ -331,6 +331,6 @@ void report_summary(const struct boot_state *s)
         con_puts(L" before this summary");
     }
 #endif
-    con_puts(L"\r\nEntering kernel\r\n");
+    con_puts(L"\r\n");
 }
 #endif
