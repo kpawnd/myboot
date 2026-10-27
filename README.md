@@ -1,9 +1,14 @@
 # MYBOOT
 
 An x86-64 UEFI bootloader written from scratch in C: no GRUB, Limine, gnu-efi
-or libc. It loads an ELF64 kernel and its modules from the boot volume, builds
-the kernel's page tables, exits boot services and jumps to the kernel with a
-documented machine state (boot protocol: [`include/bootinfo/bootinfo.h`](include/bootinfo/bootinfo.h)).
+or libc. It boots three kinds of entries:
+
+- **Linux** kernels through their EFI stub, with initrds and a command line.
+- **Other EFI programs**: Windows Boot Manager (found automatically), another
+  loader, a UEFI shell.
+- **Kernels for its own boot protocol**: ELF64, with modules, page tables
+  built for the kernel, and a documented machine state
+  ([`include/bootinfo/bootinfo.h`](include/bootinfo/bootinfo.h)).
 
 Status: the UEFI path is complete and tested in QEMU + OVMF. The legacy BIOS
 backend is not started. It has not yet been run on real hardware.
@@ -18,12 +23,34 @@ make [CONFIG=debug|balanced|release]   # loader + test kernel into build/$CONFIG
 make run                               # boot that ESP in QEMU (window + serial)
 make test                              # one headless boot; passes on exit status 33
 make test-all                          # every scenario in tests/run.sh
+make test-fs                           # filesystem driver on the host (needs Python, 7-Zip)
 make iso                               # build/$CONFIG/myboot.iso, hybrid CD/USB image
 make size                              # binary sizes
 ```
 
-`debug` and `balanced` print a boot summary; `release` prints only errors and
-the menu.
+The loader prints a boot log in the style of systemd, one tagged line per
+step:
+
+```
+[  OK  ] Read configuration \EFI\MYBOOT\BOOT.CFG (2 entries)
+         Booting 'Test kernel with self-test module'
+[  OK  ] Loaded kernel \EFI\MYBOOT\KERNEL.ELF (46 KiB)
+[FAILED] cannot open module: \EFI\MYBOOT\NOPE.MOD (not found)
+```
+
+Every build logs the files it loads, errors and config warnings. `debug` and
+`balanced` also log what the hardware discovery found, and `debug` adds
+detail lines (CPU features, ACPI tables, timings). The loader never waits on
+purpose: its lines appear as fast as the work is done.
+
+The kernel receives the same log (`loader_log` in `boot_info`). The test
+kernel shows it again on its own screen, followed by its checks, one line at
+a time when its command line has `log_delay=MS` (the shipped BOOT.CFG uses
+40 ms).
+
+`make test-all` also chainloads a small test program and, when a Linux
+kernel with an EFI stub is available (`LINUX_KERNEL`, `LINUX_INITRD`; the
+WSL kernel by default), boots Linux with an initrd.
 
 ## Files on the boot volume
 
@@ -52,14 +79,66 @@ module INITRD.IMG initrd     # file, then the string the kernel sees with it
 entry Known-good kernel
 kernel /EFI/MYBOOT/KERNEL.OLD
 cmdline root=/dev/nvme0n1p2
+
+entry Linux
+linux /EFI/linux/vmlinuz     # any distro kernel (EFI stub)
+initrd /EFI/linux/initrd.img # several initrd lines are concatenated
+cmdline root=UUID=... rw quiet
+
+entry Linux from /boot
+volume uuid=0a3f...          # the ext4 filesystem holding /boot (see below)
+linux /boot/vmlinuz          # symlinks such as /boot/vmlinuz are followed
+initrd /boot/initrd.img
+cmdline root=UUID=0a3f... rw quiet
+
+entry UEFI shell
+efi /EFI/tools/shellx64.efi  # any EFI program; cmdline = its load options
 ```
 
-- Up to 9 entries, 8 modules each. Paths may use `/` or `\`, at most 127
+Each entry has exactly one of `kernel`, `linux` or `efi`. Windows Boot
+Manager needs no entry: if `\EFI\Microsoft\Boot\bootmgfw.efi` exists on any
+partition, the menu lists it after your entries (`auto_windows no` turns
+this off). The partitions are scanned only when the menu is shown.
+
+The initrd is passed the way Linux 5.8 and later expect (the `LoadFile2`
+protocol).
+
+### Files on other partitions: `volume`
+
+Without a `volume` line, an entry's files are on the partition the loader
+was started from (the ESP). `volume` points the entry at another partition,
+by the identifiers `blkid` and `/etc/fstab` use:
+
+```
+volume uuid=0a3f1c2e-...     # filesystem UUID (ext4), or FAT serial like 1A2B-3C4D
+volume partuuid=7e57d15c-... # GPT partition GUID, or MBR "1234abcd-02"
+volume label=rootfs          # filesystem label (case-sensitive)
+```
+
+Case and dashes in UUIDs do not matter. The loader reads **FAT** through the
+firmware and **ext2, ext3 and ext4** with its own read-only driver, so
+`/boot` on a typical Linux install works directly, with no copying to the
+ESP after kernel updates. On ext4, names are case-sensitive, symlinks are
+followed, and relative paths still mean `/EFI/MYBOOT/`, so give absolute
+paths. If no partition matches, the entry fails and the next one is tried.
+
+The ext4 driver reads extents, ext2/3 block maps, 64-bit and `meta_bg`
+layouts, and htree directories. It does not read encrypted (fscrypt) files
+or inline data larger than 60 bytes, and it does not replay the journal: a
+`/boot` that was not cleanly unmounted may show the state of its last
+checkpoint. Partitions are scanned only when an entry names a `volume` or
+the menu looks for Windows.
+
+### Limits
+
+- Up to 9 entries, 8 modules or initrds each. Paths may use `/` or `\`, at most 127
   characters, no spaces. The cmdline can be up to 1023 characters, and a
   module string up to 111.
 - **Fallback:** if the chosen entry cannot be loaded (missing file, invalid
   ELF, out of memory), the loader frees what it loaded and tries the next
   entry, then the rest in order. Keep a known-good kernel as the last entry.
+  A Linux kernel or EFI program that started and then returned does not
+  fall back; the recovery screen appears instead.
 - A line the loader cannot use is reported with its line number and skipped.
   The rest of the file still works. The errors also appear at the top of the
   menu.

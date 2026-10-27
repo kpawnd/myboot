@@ -41,10 +41,14 @@ typedef struct {
 #define EFI_UNSUPPORTED        (EFI_ERROR_BIT | 3)
 #define EFI_BUFFER_TOO_SMALL   (EFI_ERROR_BIT | 5)
 #define EFI_NOT_READY          (EFI_ERROR_BIT | 6)
+#define EFI_DEVICE_ERROR       (EFI_ERROR_BIT | 7)
 #define EFI_OUT_OF_RESOURCES   (EFI_ERROR_BIT | 9)
 #define EFI_VOLUME_CORRUPTED   (EFI_ERROR_BIT | 10)
 #define EFI_NOT_FOUND          (EFI_ERROR_BIT | 14)
 #define EFI_ABORTED            (EFI_ERROR_BIT | 21)
+/* Bit 62 marks statuses defined by the platform or OS rather than the
+ * specification; the loader keeps its own filesystem errors there. */
+#define EFI_OEM_BIT            (1ULL << 62)
 
 /* 4.2 EFI_TABLE_HEADER */
 typedef struct {
@@ -96,26 +100,31 @@ typedef struct {
                                       UINTN *MapKey, UINTN *DescriptorSize,
                                       uint32_t *DescriptorVersion);
     void *AllocatePool;
-    void *FreePool;
+    EFI_STATUS (EFIAPI *FreePool)(void *Buffer);
     void *CreateEvent;
     void *SetTimer;
     void *WaitForEvent;
     void *SignalEvent;
     void *CloseEvent;
     void *CheckEvent;
-    void *InstallProtocolInterface;
+    EFI_STATUS (EFIAPI *InstallProtocolInterface)(EFI_HANDLE *Handle, EFI_GUID *Protocol,
+                                                  uint32_t InterfaceType, void *Interface);
     void *ReinstallProtocolInterface;
-    void *UninstallProtocolInterface;
+    EFI_STATUS (EFIAPI *UninstallProtocolInterface)(EFI_HANDLE Handle, EFI_GUID *Protocol,
+                                                    void *Interface);
     EFI_STATUS (EFIAPI *HandleProtocol)(EFI_HANDLE Handle, EFI_GUID *Protocol, void **Interface);
     void *Reserved;
     void *RegisterProtocolNotify;
     void *LocateHandle;
     void *LocateDevicePath;
     void *InstallConfigurationTable;
-    void *LoadImage;
-    void *StartImage;
+    EFI_STATUS (EFIAPI *LoadImage)(uint8_t BootPolicy, EFI_HANDLE ParentImageHandle,
+                                   void *DevicePath, void *SourceBuffer, UINTN SourceSize,
+                                   EFI_HANDLE *ImageHandle);
+    EFI_STATUS (EFIAPI *StartImage)(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
+                                    CHAR16 **ExitData);
     void *Exit;
-    void *UnloadImage;
+    EFI_STATUS (EFIAPI *UnloadImage)(EFI_HANDLE ImageHandle);
     EFI_STATUS (EFIAPI *ExitBootServices)(EFI_HANDLE ImageHandle, UINTN MapKey);
     void *GetNextMonotonicCount;
     EFI_STATUS (EFIAPI *Stall)(UINTN Microseconds);
@@ -127,7 +136,9 @@ typedef struct {
     void *CloseProtocol;
     void *OpenProtocolInformation;
     void *ProtocolsPerHandle;
-    void *LocateHandleBuffer;
+    EFI_STATUS (EFIAPI *LocateHandleBuffer)(uint32_t SearchType, EFI_GUID *Protocol,
+                                            void *SearchKey, UINTN *NoHandles,
+                                            EFI_HANDLE **Buffer);
     EFI_STATUS (EFIAPI *LocateProtocol)(EFI_GUID *Protocol, void *Registration, void **Interface);
     void *InstallMultipleProtocolInterfaces;
     void *UninstallMultipleProtocolInterfaces;
@@ -139,6 +150,9 @@ typedef struct {
 
 /* 12.4 EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL */
 #define EFI_LIGHTGRAY            0x07
+#define EFI_LIGHTGREEN           0x0A
+#define EFI_LIGHTRED             0x0C
+#define EFI_YELLOW               0x0E
 #define EFI_WHITE                0x0F
 #define EFI_BACKGROUND_LIGHTGRAY 0x70
 
@@ -339,6 +353,15 @@ typedef struct {
     EFI_BLOCK_IO_MEDIA *Media;
 } EFI_BLOCK_IO_PROTOCOL;
 
+/* 13.7 EFI_DISK_IO_PROTOCOL: byte-addressed reads on top of Block I/O */
+typedef struct EFI_DISK_IO_PROTOCOL EFI_DISK_IO_PROTOCOL;
+struct EFI_DISK_IO_PROTOCOL {
+    uint64_t Revision;
+    EFI_STATUS (EFIAPI *ReadDisk)(EFI_DISK_IO_PROTOCOL *This, uint32_t MediaId, uint64_t Offset,
+                                  UINTN BufferSize, void *Buffer);
+    void *WriteDisk;
+};
+
 /* 10.2-10.3 Device path nodes: a byte stream of {type, subtype, length16}
  * headers. Nodes are not aligned, so fields are read byte-wise. */
 #define DP_TYPE_MESSAGING 0x03
@@ -354,6 +377,20 @@ typedef struct {
 #define DP_MSG_EMMC       0x1D
 #define DP_MEDIA_HD       0x01
 #define DP_MEDIA_CDROM    0x02
+#define DP_MEDIA_VENDOR   0x03
+#define DP_MEDIA_FILEPATH 0x04
+#define DP_END_ENTIRE     0xFF
+
+/* 2.4.1 InstallProtocolInterface, 7.3.15 LocateHandleBuffer */
+#define EFI_NATIVE_INTERFACE 0u
+#define ByProtocol           2u
+
+/* 13.2 EFI_LOAD_FILE2_PROTOCOL: how Linux 5.8+ fetches its initrd */
+typedef struct EFI_LOAD_FILE2_PROTOCOL EFI_LOAD_FILE2_PROTOCOL;
+struct EFI_LOAD_FILE2_PROTOCOL {
+    EFI_STATUS (EFIAPI *LoadFile)(EFI_LOAD_FILE2_PROTOCOL *This, void *FilePath,
+                                  uint8_t BootPolicy, UINTN *BufferSize, void *Buffer);
+};
 
 /* Layout verification against the specification (x86-64, 8-byte pointers). */
 _Static_assert(sizeof(EFI_GUID) == 16, "EFI_GUID size");
@@ -375,7 +412,14 @@ _Static_assert(offsetof(EFI_SYSTEM_TABLE, ConfigurationTable) == 112, "ST.Config
 _Static_assert(sizeof(EFI_SYSTEM_TABLE) == 120, "EFI_SYSTEM_TABLE size");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, AllocatePages) == 40, "BS.AllocatePages");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, GetMemoryMap) == 56, "BS.GetMemoryMap");
+_Static_assert(offsetof(EFI_BOOT_SERVICES, FreePool) == 72, "BS.FreePool");
+_Static_assert(offsetof(EFI_BOOT_SERVICES, InstallProtocolInterface) == 128, "BS.InstallProtocolInterface");
+_Static_assert(offsetof(EFI_BOOT_SERVICES, UninstallProtocolInterface) == 144, "BS.UninstallProtocolInterface");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, HandleProtocol) == 152, "BS.HandleProtocol");
+_Static_assert(offsetof(EFI_BOOT_SERVICES, LoadImage) == 200, "BS.LoadImage");
+_Static_assert(offsetof(EFI_BOOT_SERVICES, StartImage) == 208, "BS.StartImage");
+_Static_assert(offsetof(EFI_BOOT_SERVICES, UnloadImage) == 224, "BS.UnloadImage");
+_Static_assert(offsetof(EFI_BOOT_SERVICES, LocateHandleBuffer) == 312, "BS.LocateHandleBuffer");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, ExitBootServices) == 232, "BS.ExitBootServices");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, Stall) == 248, "BS.Stall");
 _Static_assert(offsetof(EFI_BOOT_SERVICES, SetWatchdogTimer) == 256, "BS.SetWatchdogTimer");
@@ -398,5 +442,6 @@ _Static_assert(offsetof(EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE, FrameBufferBase) == 2
 _Static_assert(offsetof(EFI_GRAPHICS_OUTPUT_PROTOCOL, Mode) == 24, "GOP.Mode");
 _Static_assert(offsetof(EFI_BLOCK_IO_MEDIA, BlockSize) == 12, "Media.BlockSize");
 _Static_assert(offsetof(EFI_BLOCK_IO_MEDIA, LastBlock) == 24, "Media.LastBlock");
+_Static_assert(offsetof(EFI_DISK_IO_PROTOCOL, ReadDisk) == 8, "DiskIo.ReadDisk");
 
 #endif

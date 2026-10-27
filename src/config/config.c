@@ -76,16 +76,53 @@ static const char *check_path(const char *p)
     return NULL;
 }
 
+static const char *after(const char *s, const char *prefix)
+{
+    while (*prefix)
+        if (*s++ != *prefix++)
+            return NULL;
+    return s;
+}
+
+static const char *check_volume(const char *v)
+{
+    const char *id;
+
+    if (str_len(v) > CFG_VOLUME_MAX)
+        return "volume longer than 63 characters";
+    if ((id = after(v, "uuid=")) || (id = after(v, "partuuid="))) {
+        uint32_t digits = 0;
+        for (; *id; id++) {
+            char c = *id;
+            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+                digits++;
+            else if (c != '-')
+                return "uuid and partuuid take hex digits and dashes";
+        }
+        return digits ? NULL : "volume has an empty identifier";
+    }
+    if ((id = after(v, "label=")))
+        return *id ? NULL : "volume has an empty label";
+    return "volume needs uuid=, partuuid= or label=";
+}
+
 static void entry_directive(struct boot_config *c, struct cfg_entry *e, uint32_t line,
                             const char *key, char *val)
 {
     const char *err = NULL;
 
-    if (str_eq(key, "kernel")) {
+    if (str_eq(key, "volume")) {
+        if (e->volume_spec)
+            err = "second volume line in one entry";
+        else if (!(err = check_volume(val)))
+            e->volume_spec = val;
+    } else if (str_eq(key, "kernel") || str_eq(key, "linux") || str_eq(key, "efi")) {
         if (e->kernel)
-            err = "second kernel line in one entry";
-        else if (!(err = check_path(val)))
+            err = "an entry takes one kernel, linux or efi line";
+        else if (!(err = check_path(val))) {
             e->kernel = val;
+            e->type = key[0] == 'k' ? CFG_KERNEL : key[0] == 'l' ? CFG_LINUX : CFG_EFI;
+        }
     } else if (str_eq(key, "cmdline")) {
         size_t n = str_len(val);
         if (e->cmdline)
@@ -96,10 +133,11 @@ static void entry_directive(struct boot_config *c, struct cfg_entry *e, uint32_t
             e->cmdline = val;
             e->cmdline_len = (uint32_t)n;
         }
-    } else { /* module */
-        char *str = split_word(val);
+    } else { /* module or initrd: which one must match the entry's type,
+              * so it is checked once the entry is complete (cfg_parse) */
+        char *str = key[0] == 'm' ? split_word(val) : (char *)"";
         if (e->nmod == CFG_MAX_MODULES)
-            err = "more than 8 modules in one entry";
+            err = "more than 8 modules or initrds in one entry";
         else if (!(err = check_path(val))) {
             if (str_len(str) > CFG_MODSTR_MAX)
                 err = "module string longer than 111 characters";
@@ -120,10 +158,12 @@ void cfg_parse(char *text, size_t len, struct boot_config *c)
     struct cfg_entry *cur = NULL;   /* entry being filled */
     bool overflow = false;          /* past CFG_MAX_ENTRIES: ignore entry lines */
     uint32_t entry_line[CFG_MAX_ENTRIES];
+    uint8_t file_kind[CFG_MAX_ENTRIES] = {0}; /* bit 0: module lines, bit 1: initrd lines */
     uint32_t line = 0, nraw = 0, want_default = 1, default_line = 0, n = 0;
     bool default_found = false;
 
     memset(c, 0, sizeof(*c));
+    c->auto_windows = 1;
     *end = 0;
     while (p < end) {
         char *eol = p, *next, *t, *key, *val;
@@ -176,11 +216,21 @@ void cfg_parse(char *text, size_t len, struct boot_config *c)
             cur = &c->entry[nraw];
             cur->title = val;
             entry_line[nraw++] = line;
-        } else if (str_eq(key, "kernel") || str_eq(key, "cmdline") || str_eq(key, "module")) {
-            if (cur)
+        } else if (str_eq(key, "auto_windows")) {
+            if (str_eq(val, "yes") || str_eq(val, "no"))
+                c->auto_windows = val[0] == 'y';
+            else
+                add_error(c, line, "auto_windows needs yes or no");
+        } else if (str_eq(key, "kernel") || str_eq(key, "linux") || str_eq(key, "efi") ||
+                   str_eq(key, "cmdline") || str_eq(key, "module") || str_eq(key, "initrd") ||
+                   str_eq(key, "volume")) {
+            if (cur) {
+                if (str_eq(key, "module") || str_eq(key, "initrd"))
+                    file_kind[nraw - 1] |= key[0] == 'm' ? 1 : 2;
                 entry_directive(c, cur, line, key, val);
-            else if (!overflow)
+            } else if (!overflow) {
                 add_error(c, line, "not inside an entry");
+            }
         } else {
             add_error(c, line, "unknown directive");
         }
@@ -188,8 +238,18 @@ void cfg_parse(char *text, size_t len, struct boot_config *c)
 
     /* Drop entries without a kernel; "default" counts entries as written. */
     for (uint32_t i = 0; i < nraw; i++) {
+        static const uint8_t allowed[] = {[CFG_KERNEL] = 1, [CFG_LINUX] = 2, [CFG_EFI] = 0};
+
         if (!c->entry[i].kernel) {
-            add_error(c, entry_line[i], "entry has no kernel line");
+            add_error(c, entry_line[i], "entry has no kernel, linux or efi line");
+            continue;
+        }
+        if (file_kind[i] & ~allowed[c->entry[i].type]) {
+            add_error(c, entry_line[i], c->entry[i].type == CFG_LINUX
+                                            ? "linux entries take initrd, not module"
+                                            : c->entry[i].type == CFG_KERNEL
+                                                ? "kernel entries take module, not initrd"
+                                                : "efi entries take no module or initrd");
             continue;
         }
         if (i + 1 == want_default) {
@@ -206,18 +266,18 @@ void cfg_parse(char *text, size_t len, struct boot_config *c)
     }
 }
 
-int cfg_resolve_path(const char *path, char *out)
+int cfg_resolve_path(const char *path, char sep, char *out)
 {
     size_t n = 0;
 
     if (str_len(path) > CFG_PATH_MAX)
         return 0;
     if (*path != '/' && *path != '\\') {
-        memcpy(out, CFG_DIR, sizeof(CFG_DIR) - 1);
-        n = sizeof(CFG_DIR) - 1;
+        for (const char *d = CFG_DIR; *d; d++)
+            out[n++] = *d == '\\' ? sep : *d;
     }
     for (; *path; path++)
-        out[n++] = *path == '/' ? '\\' : *path;
+        out[n++] = *path == '/' || *path == '\\' ? sep : *path;
     out[n] = 0;
     return 1;
 }

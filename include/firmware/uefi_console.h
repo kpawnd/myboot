@@ -11,9 +11,16 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "firmware/uefi.h"
+#include "core/util.h"
 
 void con_init(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out);
 void con_puts(const CHAR16 *s);
+
+/* Everything printed is also kept as ASCII for the kernel, except while
+ * paused (full-screen menus). */
+#define CON_LOG_MAX KiB(16)
+void        con_log_pause(int paused);
+const char *con_log(uint32_t *len); /* not NUL-terminated */
 void con_put_dec(uint64_t v);
 void con_put_hex(uint64_t v); /* "0x" + minimal digits */
 /* ASCII from firmware tables: stops at NUL or `max`, non-printables -> '?'. */

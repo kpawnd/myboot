@@ -70,12 +70,16 @@ struct boot_state {
     struct boot_mem_entry *mmap;
     uint32_t               mmap_cap;
     struct boot_module    *bmods;
+    char                  *log; /* CON_LOG_MAX bytes, filled just before exit */
     uint64_t               gdtr_virt;
     uint64_t               stack_top_virt;
 
     uint32_t ebs_attempts;
 };
 
-void report_summary(const struct boot_state *s);
+/* report.c, BOOT_LOG builds: status lines for what discovery found, and
+ * for the prepared handoff. */
+void report_discovery(const struct boot_state *s);
+void report_handoff(const struct boot_state *s);
 
 #endif

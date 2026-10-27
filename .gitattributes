@@ -1,0 +1,5 @@
+# Shell scripts and the Makefile must keep LF line endings even when Git
+# converts text files to CRLF on Windows checkouts: sh and make do not
+# accept CR at line ends.
+*.sh     text eol=lf
+Makefile text eol=lf

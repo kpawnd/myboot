@@ -310,6 +310,7 @@ static void run(struct menu *m, struct menu_choice *out)
     /* The firmware watchdog would reset the machine while a person reads
      * the menu; re-armed with its default once a choice is made. */
     g_uefi.bs->SetWatchdogTimer(0, 0, 0, NULL);
+    con_log_pause(1); /* screen drawing is not log */
     if (fw_setup_supported())
         m->special[m->nspecial++] = ITEM_FW_SETUP;
     m->special[m->nspecial++] = ITEM_REBOOT;
@@ -377,10 +378,11 @@ static void run(struct menu *m, struct menu_choice *out)
     con_attr(ATTR_NORMAL);
     con_clear();
     con_cursor(1);
+    con_log_pause(0);
     g_uefi.bs->SetWatchdogTimer(WATCHDOG_DEFAULT, 0, 0, NULL);
 }
 
-void menu_choose(const struct boot_config *c, struct menu_choice *out)
+void menu_choose(const struct boot_config *c, struct menu_choice *out, void (*prepare)(void))
 {
     struct menu m = {.cfg = c, .in = g_uefi.st->ConIn, .sel = c->default_entry};
     EFI_INPUT_KEY key;
@@ -397,10 +399,11 @@ void menu_choose(const struct boot_config *c, struct menu_choice *out)
     } else if (EFI_ERROR(m.in->ReadKeyStroke(m.in, &key))) {
         return; /* no menu, no key held: boot the default without waiting */
     }
+    prepare(); /* may add entries; before run() counts them */
     run(&m, out);
 }
 
-void menu_recover(const struct boot_config *c, struct menu_choice *out)
+void menu_recover(const struct boot_config *c, struct menu_choice *out, void (*prepare)(void))
 {
     struct menu m = {.cfg = c, .in = g_uefi.st->ConIn, .recovery = true,
                      .counting = true, .left_us = (uint64_t)RECOVERY_TIMEOUT * 1000000};
@@ -412,5 +415,6 @@ void menu_recover(const struct boot_config *c, struct menu_choice *out)
         return;
     }
     m.in->Reset(m.in, 0);
+    prepare(); /* may add entries; before run() counts them */
     run(&m, out);
 }

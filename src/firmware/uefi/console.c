@@ -1,17 +1,55 @@
+#include <stdbool.h>
 #include "firmware/uefi_console.h"
 
-/* The only console state: the protocol pointer from the system table. */
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_con;
+
+/* Copy of the boot messages for the kernel (boot_info.loader_log): plain
+ * ASCII, '\n' line ends. Full-screen menus pause it, since their output is
+ * drawing, not log. When full it keeps the beginning, which explains what
+ * happened first, and marks the cut. */
+static char     g_log[CON_LOG_MAX];
+static uint32_t g_log_len;
+static bool     g_log_paused, g_log_full;
 
 void con_init(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out)
 {
     g_con = out;
 }
 
+static void log_append(const CHAR16 *s)
+{
+    static const char cut[] = "[log truncated]\n";
+
+    for (; *s && !g_log_full; s++) {
+        if (*s == L'\r')
+            continue;
+        if (g_log_len + sizeof(cut) >= CON_LOG_MAX) {
+            for (const char *c = cut; *c; c++)
+                g_log[g_log_len++] = *c;
+            g_log_full = true;
+            break;
+        }
+        g_log[g_log_len++] = (*s == L'\n' || (*s >= 0x20 && *s < 0x7F)) ? (char)*s : '?';
+    }
+}
+
 void con_puts(const CHAR16 *s)
 {
+    if (!g_log_paused)
+        log_append(s);
     /* The spec types String as non-const, but OutputString never writes it. */
     g_con->OutputString(g_con, (CHAR16 *)s);
+}
+
+void con_log_pause(int paused)
+{
+    g_log_paused = paused != 0;
+}
+
+const char *con_log(uint32_t *len)
+{
+    *len = g_log_len;
+    return g_log;
 }
 
 void con_put_dec(uint64_t v)

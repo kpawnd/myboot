@@ -174,6 +174,14 @@ static void load_config(void)
     else if (EFI_ERROR(s) && s != EFI_NOT_FOUND)
         boot_error(L"cannot read BOOT.CFG", NULL, s);
     if (!EFI_ERROR(s)) {
+        if (g_cfg.nentries) {
+            blog_str("Read configuration ");
+            blog_str(CONFIG_PATH);
+            blog_str(" (");
+            blog_dec(g_cfg.nentries);
+            blog_str(g_cfg.nentries == 1 ? " entry)" : " entries)");
+            blog_end(TAG_OK);
+        }
         report_config_errors();
         if (g_cfg.nentries) {
             S.have_cfg = true;
@@ -182,7 +190,14 @@ static void load_config(void)
         boot_error(L"BOOT.CFG has no usable entry; using \\EFI\\MYBOOT\\KERNEL.ELF", NULL, 0);
     }
 
+    if (s == EFI_NOT_FOUND) {
+        blog_str("No ");
+        blog_str(CONFIG_PATH);
+        blog_str("; using the built-in entry");
+        blog_end(TAG_INFO);
+    }
     memset(&g_cfg, 0, sizeof(g_cfg));
+    g_cfg.auto_windows = 1;
     g_cfg.nentries = 1;
     e = &g_cfg.entry[0];
     e->title = "";
@@ -197,7 +212,7 @@ static void load_config(void)
  * (1 read per segment, no intermediate buffer). Every byte of the block is
  * written exactly once: either file data or zero (BSS, gaps, page tails).
  */
-static EFI_STATUS load_kernel(const char *path)
+static EFI_STATUS load_kernel(struct uefi_vol *vol, const char *path)
 {
     EFI_BOOT_SERVICES *bs = g_uefi.bs;
     EFI_PHYSICAL_ADDRESS addr;
@@ -205,10 +220,10 @@ static EFI_STATUS load_kernel(const char *path)
     enum elf_error e;
     EFI_STATUS s;
 
-    if (!cfg_resolve_path(path, S.kpath))
+    if (!cfg_resolve_path(path, kfile_sep(vol), S.kpath))
         return entry_error(L"kernel path too long", path, EFI_INVALID_PARAMETER);
-    boot_progress(L"Loading kernel", S.kpath);
-    if (EFI_ERROR(s = kfile_open(&S.kf, S.kpath)))
+    boot_progress(L"kernel", S.kpath);
+    if (EFI_ERROR(s = kfile_open_on(&S.kf, vol, S.kpath)))
         return entry_error(L"cannot open kernel", S.kpath, s);
     hdr_len = S.kf.size < sizeof(g_hdr_buf) ? S.kf.size : sizeof(g_hdr_buf);
     if (EFI_ERROR(s = kfile_read(&S.kf, 0, g_hdr_buf, hdr_len)))
@@ -250,7 +265,7 @@ static EFI_STATUS load_kernel(const char *path)
 }
 
 /* The whole file in one read, straight into its own page allocation. */
-static EFI_STATUS load_module(const struct cfg_module *m)
+static EFI_STATUS load_module(struct uefi_vol *vol, const struct cfg_module *m)
 {
     struct loaded_module *lm = &S.mods[S.nmod];
     char path[CFG_RESOLVED_MAX];
@@ -258,10 +273,10 @@ static EFI_STATUS load_module(const struct cfg_module *m)
     EFI_PHYSICAL_ADDRESS addr;
     EFI_STATUS s;
 
-    if (!cfg_resolve_path(m->path, path))
+    if (!cfg_resolve_path(m->path, kfile_sep(vol), path))
         return entry_error(L"module path too long", m->path, EFI_INVALID_PARAMETER);
-    boot_progress(L"Loading module", path);
-    if (EFI_ERROR(s = kfile_open(&f, path))) {
+    boot_progress(L"module", path);
+    if (EFI_ERROR(s = kfile_open_on(&f, vol, path))) {
         kfile_close(&f);
         return entry_error(L"cannot open module", path, s);
     }
@@ -291,24 +306,47 @@ static EFI_STATUS load_module(const struct cfg_module *m)
     return EFI_SUCCESS;
 }
 
-static EFI_STATUS load_entry(uint32_t idx)
+/* Entries found on disk rather than in BOOT.CFG. Needs every volume opened,
+ * so the menu calls it only when it is about to be shown. */
+static void add_auto_entries(void)
 {
-    const struct cfg_entry *e = &g_cfg.entry[idx];
+    chain_add_windows(&g_cfg);
+}
+
+/* MYBOOT-protocol entries are loaded here and started by efi_main. Linux
+ * and EFI entries are started by chain_boot, which returns only if that
+ * failed; `started` then says whether the program ran and came back. */
+static EFI_STATUS load_entry(uint32_t idx, const char *cmdline, uint32_t cmdline_len, bool *started)
+{
+    struct cfg_entry *e = &g_cfg.entry[idx];
+    struct uefi_vol *vol;
     EFI_STATUS s;
 
     S.entry = idx;
-    if (EFI_ERROR(s = load_kernel(e->kernel)))
+    S.cmdline = cmdline;
+    S.cmdline_len = cmdline_len;
+    if (cmdline_len) {
+        blog_str("Command line: ");
+        blog_ascii(cmdline, cmdline_len);
+        blog_end(TAG_INFO);
+    }
+    if (!(vol = vol_for_entry(e)))
+        return EFI_NOT_FOUND;
+    if (e->type != CFG_KERNEL)
+        return chain_boot(e, vol, cmdline, cmdline_len, started);
+    if (EFI_ERROR(s = load_kernel(vol, e->kernel)))
         return s;
     for (uint32_t i = 0; i < e->nmod; i++)
-        if (EFI_ERROR(s = load_module(&e->mod[i])))
+        if (EFI_ERROR(s = load_module(vol, &e->mod[i])))
             return s;
-    S.cmdline = e->cmdline;
-    S.cmdline_len = e->cmdline ? e->cmdline_len : 0;
     return EFI_SUCCESS;
 }
 
 /* The chosen entry (with its command line as edited at the menu), then
- * every other entry in order. Stops at the first that loads. */
+ * every other entry in order. Stops at the first that loads, or at a
+ * chainloaded program that ran and returned: falling back to a different
+ * system after that would surprise the user, so the recovery screen
+ * decides instead. */
 static EFI_STATUS load_entries(const struct menu_choice *c)
 {
     EFI_STATUS s = EFI_LOAD_ERROR;
@@ -318,28 +356,24 @@ static EFI_STATUS load_entries(const struct menu_choice *c)
         const struct cfg_entry *e = &g_cfg.entry[idx];
 
         if (i) {
-            con_puts(L"Falling back to entry ");
-            con_put_dec(idx + 1);
-            con_puts(L": ");
+            blog_str("Falling back to entry ");
+            blog_dec(idx + 1);
+            blog_str(": ");
         } else {
-            con_puts(L"Booting ");
+            blog_str("Booting ");
         }
-        con_puts(L"'");
-        con_put_ascii(e->title[0] ? e->title : e->kernel, CFG_PATH_MAX);
-        con_puts(L"'\r\n");
-        if (!EFI_ERROR(s = load_entry(idx))) {
-            if (i == 0 && c->cmdline) {
-                S.cmdline = c->cmdline;
-                S.cmdline_len = c->cmdline_len;
-            }
-            if (S.cmdline_len) {
-                con_puts(L"Command line: ");
-                con_put_ascii(S.cmdline, S.cmdline_len);
-                con_puts(L"\r\n");
-            }
+        blog_str("'");
+        blog_ascii(e->title[0] ? e->title : e->kernel, CFG_PATH_MAX);
+        blog_str("'");
+        blog_end(TAG_INFO);
+        bool edited = i == 0 && c->cmdline, started = false;
+        s = load_entry(idx, edited ? c->cmdline : e->cmdline,
+                       edited ? c->cmdline_len : (e->cmdline ? e->cmdline_len : 0), &started);
+        if (!EFI_ERROR(s))
             return EFI_SUCCESS;
-        }
         release_entry();
+        if (started)
+            break;
     }
     return s;
 }
@@ -485,7 +519,7 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     S.mmap_cap = uefi_mmap_capacity(&S.mem->map) + 2 * S.ncarve + 2;
     size = (uint64_t)S.pt_bound * PAGE_SIZE + KERNEL_STACK_SIZE + sizeof(struct boot_info) + 64 +
            (uint64_t)S.nmod * sizeof(struct boot_module) + 16 +
-           (uint64_t)S.mmap_cap * sizeof(struct boot_mem_entry) + S.cmdline_len + 1 + 64;
+           (uint64_t)S.mmap_cap * sizeof(struct boot_mem_entry) + S.cmdline_len + 1 + CON_LOG_MAX + 64;
     S.arena_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (EFI_ERROR(s = g_uefi.bs->AllocatePages(AllocateAnyPages, EfiLoaderData, S.arena_pages, &addr))) {
         S.arena_pages = 0;
@@ -503,7 +537,8 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     S.bmods = arena_alloc(&S.arena, (uint64_t)S.nmod * sizeof(struct boot_module), 16);
     S.mmap = arena_alloc(&S.arena, (uint64_t)S.mmap_cap * sizeof(struct boot_mem_entry), 8);
     cmdline = arena_alloc(&S.arena, S.cmdline_len + 1, 1);
-    if (!pool || !stack || !S.bi || !gdt || !gdtr || !S.bmods || !S.mmap || !cmdline)
+    S.log = arena_alloc(&S.arena, CON_LOG_MAX, 8);
+    if (!pool || !stack || !S.bi || !gdt || !gdtr || !S.bmods || !S.mmap || !cmdline || !S.log)
         return fail(L"boot data arena too small", NULL, EFI_OUT_OF_RESOURCES);
 
     if (!pt_init(&S.pt, pool, S.pt_bound, S.la57, S.nx) ||
@@ -587,15 +622,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     PROF_MARK(PROF_GRAPHICS);
     S.dev = discover_storage();
     PROF_MARK(PROF_STORAGE);
+#if BOOT_LOG
+    report_discovery(&S);
+#endif
 
     load_config();
-    menu_choose(&g_cfg, &choice);
+    menu_choose(&g_cfg, &choice, add_auto_entries);
     PROF_MARK(PROF_CONFIG);
 
     /* Until an entry loads: the chosen one, then the others in order as
      * fallbacks; if all fail, the recovery screen picks again or gives up. */
     while (choice.action == MENU_BOOT && EFI_ERROR(s = load_entries(&choice))) {
-        menu_recover(&g_cfg, &choice);
+        menu_recover(&g_cfg, &choice, add_auto_entries);
         boot_errors_clear();
     }
     if (choice.action == MENU_RETURN) {
@@ -608,9 +646,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     PROF_MARK(PROF_PAGING);
 
 #if BOOT_LOG
-    report_summary(&S);
+    report_handoff(&S);
 #endif
-    con_puts(L"Starting kernel ...\r\n"); /* the last output before firmware exits */
+    blog_str("Starting kernel ..."); /* the last output before firmware exits */
+    blog_end(TAG_INFO);
+    {
+        uint32_t len;
+        const char *log = con_log(&len);
+
+        memcpy(S.log, log, len);
+        S.bi->loader_log = (uintptr_t)S.log;
+        S.bi->loader_log_size = len;
+    }
 
     if (EFI_ERROR(s = exit_firmware()))
         return s;

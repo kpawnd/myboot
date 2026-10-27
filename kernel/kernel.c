@@ -3,6 +3,10 @@
  * receiving side, prints the boot_info it was given to COM1, and (only
  * under a hypervisor) exits QEMU through isa-debug-exit so tests can be
  * automated: exit status 33 = all checks passed, 35 = a check failed.
+ *
+ * The screen shows a systemd-style boot log: the loader's lines, then one
+ * "[  OK  ]" line per group of checks. "log_delay=MS" in the command line
+ * shows the lines one at a time, MS milliseconds apart.
  */
 #include <stdbool.h>
 #include <stddef.h>
@@ -65,7 +69,7 @@ static void serial_putc(char c)
 #define CON_COLS 256
 #define CON_ROWS 128
 
-enum { COL_TEXT, COL_OK, COL_FAIL, COL_TITLE };
+enum { COL_TEXT, COL_OK, COL_FAIL, COL_WARN, COL_COUNT };
 
 static uint8_t con_chars[CON_ROWS][CON_COLS];
 static uint8_t con_color[CON_ROWS][CON_COLS];
@@ -127,14 +131,14 @@ static void con_flush(const struct boot_info *bi)
 {
     const struct boot_framebuffer *fb = &bi->framebuffer;
     uint8_t *base = (uint8_t *)(bi->hhdm_base + fb->base);
-    uint32_t fg[4], bg = rgb(fb, 0, 0, 0);
+    uint32_t fg[COL_COUNT], bg = rgb(fb, 0, 0, 0);
 
     if (!con_rows)
         return;
     fg[COL_TEXT] = rgb(fb, 0xC0, 0xC0, 0xC0);
     fg[COL_OK] = rgb(fb, 0x40, 0xE0, 0x40);
     fg[COL_FAIL] = rgb(fb, 0xFF, 0x50, 0x50);
-    fg[COL_TITLE] = rgb(fb, 0xFF, 0xFF, 0xFF);
+    fg[COL_WARN] = rgb(fb, 0xFF, 0xD0, 0x40);
     for (uint32_t y = 0; y < fb->height; y++) {
         volatile uint32_t *px = (volatile uint32_t *)(base + (uint64_t)y * fb->pitch);
         uint32_t row = y / CELL_H, gy = y % CELL_H;
@@ -152,10 +156,32 @@ static void con_flush(const struct boot_info *bi)
     }
 }
 
+/* log_delay: after each screen line, draw the screen and wait. Set only
+ * once the framebuffer is known to be mapped. */
+static const struct boot_info *g_screen;
+static uint64_t g_delay_ticks;
+
+static void pace(void)
+{
+    if (!g_delay_ticks)
+        return;
+    con_flush(g_screen);
+    for (uint64_t t0 = rdtsc(); rdtsc() - t0 < g_delay_ticks;)
+        ;
+}
+
+/* Detail (each passing check, the boot_info fields, the memory map) goes to
+ * serial only, so the screen stays a readable boot log. */
+static bool g_detail;
+
 static void kputc(char c)
 {
     serial_putc(c);
+    if (g_detail)
+        return;
     con_putc(c);
+    if (c == '\n')
+        pace();
 }
 
 static void kputs(const char *s) { while (*s) kputc(*s++); }
@@ -189,18 +215,37 @@ static void put_hex(uint64_t v, int digits)
 
 static unsigned g_pass, g_fail;
 
+/* "[  OK  ] " or "[FAILED] ", coloured; the caller writes the rest. */
+static void tag(bool ok)
+{
+    kputc('[');
+    con_cur = ok ? COL_OK : COL_FAIL;
+    kputs(ok ? "  OK  " : "FAILED");
+    con_cur = COL_TEXT;
+    kputs("] ");
+}
+
 static void check(bool ok, const char *what)
 {
-    con_cur = ok ? COL_OK : COL_FAIL;
-    kputs(ok ? "  ok    " : "  FAIL  ");
-    con_cur = COL_TEXT;
+    g_detail = ok; /* failures always reach the screen */
+    if (ok)
+        kputs("  ok      ");
+    else
+        tag(false);
     kputs(what);
     kputc('\n');
+    g_detail = false;
     if (ok)
         g_pass++;
     else
         g_fail++;
 }
+
+/* A group of checks ends in one screen line, OK if none of them failed. */
+static unsigned g_group_fail;
+
+static void group_begin(void) { g_group_fail = g_fail; }
+static void group_end(void) { tag(g_fail == g_group_fail); }
 
 struct mapping {
     bool present, writable, executable;
@@ -252,12 +297,15 @@ static void check_memory_map(const struct boot_info *bi)
     uint64_t usable = 0, reclaim = 0;
     bool aligned = true, ordered = true, kernel_ok = false, bi_ok = false;
 
+    group_begin();
+    g_detail = true;
     kputs("memory map (");
     put_dec(bi->mmap_count);
     kputs(" entries):\n");
     for (uint32_t i = 0; i < bi->mmap_count; i++) {
         uint64_t end = e[i].base + e[i].length;
 
+        g_detail = true;
         kputs("  ");
         put_hex(e[i].base, 16);
         kputs("-");
@@ -286,11 +334,18 @@ static void check_memory_map(const struct boot_info *bi)
     kputs(" MiB, loader-reclaimable ");
     put_dec(reclaim >> 10);
     kputs(" KiB\n");
+    g_detail = false;
     check(bi->mmap_count > 0 && bi->mmap_entry_size == sizeof(struct boot_mem_entry), "memory map present");
     check(aligned, "memory map entries 4 KiB aligned, non-empty");
     check(ordered, "memory map sorted, non-overlapping");
     check(kernel_ok, "kernel image covered by a KERNEL entry");
     check(bi_ok, "boot_info inside a BOOTLOADER_RECLAIMABLE entry");
+    group_end();
+    kputs("Verified memory map: ");
+    put_dec(bi->mmap_count);
+    kputs(" entries, ");
+    put_dec(usable >> 20);
+    kputs(" MiB usable\n");
 }
 
 static void check_machine_state(const struct boot_info *bi, uint64_t entry_rsp)
@@ -305,6 +360,7 @@ static void check_machine_state(const struct boot_info *bi, uint64_t entry_rsp)
     __asm__ volatile("mov %%cs, %0" : "=r"(cs));
     __asm__ volatile("mov %%ss, %0" : "=r"(ss));
 
+    group_begin();
     check(!(rflags & (1u << 9)), "interrupts disabled");
     check((entry_rsp + 8) % 16 == 0 && *(const uint64_t *)entry_rsp == 0,
           "stack aligned as after CALL, return address 0");
@@ -313,6 +369,9 @@ static void check_machine_state(const struct boot_info *bi, uint64_t entry_rsp)
     check(!!(efer & EFER_NXE) == nx, "EFER.NXE matches BOOT_F_NX");
     check(!!(cr4 & CR4_LA57) == !!(bi->flags & BOOT_F_LA57), "CR4.LA57 matches BOOT_F_LA57");
     check(cs == 0x08 && ss == 0x10, "CS = 0x08, SS = 0x10");
+    group_end();
+    kputs("Verified CPU state: long mode, interrupts off");
+    kputs(nx ? ", NX on\n" : "\n");
 }
 
 /* First and last byte of the framebuffer must be mapped to themselves:
@@ -340,6 +399,7 @@ static void check_mappings(const struct boot_info *bi)
     for (size_t i = 0; i < sizeof(bss_probe); i++)
         bss_zero = bss_zero && bss_probe[i] == 0;
 
+    group_begin();
     check(t.present && !t.writable && t.executable, ".text mapped read-only, executable");
     check(r.present && !r.writable && (!nx || !r.executable), ".rodata mapped read-only, no-execute");
     check(d.present && d.writable && (!nx || !d.executable), ".data/.bss mapped writable, no-execute");
@@ -353,6 +413,11 @@ static void check_mappings(const struct boot_info *bi)
           "boot_info pointer inside the HHDM");
     if (bi->framebuffer.base)
         check(fb_mapped(bi), "framebuffer mapped writable at hhdm_base + base");
+    group_end();
+    kputs("Verified page tables: kernel sections, direct map of ");
+    put_dec(bi->hhdm_size >> 20);
+    kputs(" MiB");
+    kputs(bi->framebuffer.base ? ", framebuffer\n" : "\n");
 }
 
 static bool mmap_covers(const struct boot_info *bi, uint64_t base, uint64_t len, uint32_t type)
@@ -372,11 +437,10 @@ static bool str_eq(const char *a, const char *b)
     return *a == *b;
 }
 
-/* "modules=N" in the command line: how many modules BOOT.CFG gave this
- * entry. -1 when absent (e.g. booted without BOOT.CFG). */
-static int expected_modules(const struct boot_info *bi)
+/* "key=N" in the command line, or -1 when absent. "modules=N" says how
+ * many modules BOOT.CFG gave this entry; "log_delay=MS" paces the screen. */
+static long cmdline_num(const struct boot_info *bi, const char *key)
 {
-    static const char key[] = "modules=";
     const char *start, *p;
 
     if (!bi->cmdline)
@@ -384,12 +448,17 @@ static int expected_modules(const struct boot_info *bi)
     start = (const char *)(bi->hhdm_base + bi->cmdline);
     for (p = start; *p; p++) {
         size_t i = 0;
+        long v = 0;
+
         if (p != start && p[-1] != ' ')
             continue;
         while (key[i] && p[i] == key[i])
             i++;
-        if (!key[i] && p[i] >= '0' && p[i] <= '9')
-            return p[i] - '0';
+        if (key[i] || p[i] < '0' || p[i] > '9')
+            continue;
+        for (; p[i] >= '0' && p[i] <= '9' && v < 100000; i++)
+            v = v * 10 + (p[i] - '0');
+        return v;
     }
     return -1;
 }
@@ -400,16 +469,21 @@ static const char selftest_magic[] = "MYBOOT self-test module";
 static void check_modules(const struct boot_info *bi)
 {
     const struct boot_module *m = (const struct boot_module *)(bi->hhdm_base + bi->modules);
-    int want = expected_modules(bi);
+    long want = cmdline_num(bi, "modules=");
     bool placed = true, zero_tail = true, selftest_ok = true, terminated = true;
 
+    group_begin();
+    g_detail = true;
     kputs("modules        : ");
     put_dec(bi->module_count);
     kputc('\n');
+    g_detail = false;
     if (want >= 0)
-        check(bi->module_count == (uint32_t)want, "module count matches cmdline modules=");
+        check(bi->module_count == (uint64_t)want, "module count matches cmdline modules=");
     if (!bi->module_count) {
         check(bi->modules == 0, "no module array without modules");
+        group_end();
+        kputs("Verified module list: no modules\n");
         return;
     }
     check(bi->modules && bi->module_entry_size == sizeof(struct boot_module), "module array present");
@@ -418,6 +492,7 @@ static void check_modules(const struct boot_info *bi)
         uint64_t end = (m[i].size + 0xFFF) & ~0xFFFull;
 
         terminated = terminated && m[i].string[sizeof(m[i].string) - 1] == 0;
+        g_detail = true;
         kputs("  ");
         kputsn(m[i].string, sizeof(m[i].string));
         kputs(" at ");
@@ -425,6 +500,7 @@ static void check_modules(const struct boot_info *bi)
         kputs(", ");
         put_dec(m[i].size);
         kputs(" bytes\n");
+        g_detail = false;
         if (!m[i].size)
             continue;
         if ((m[i].base & 0xFFF) || !mmap_covers(bi, m[i].base, end, BOOT_MEM_MODULE))
@@ -439,6 +515,14 @@ static void check_modules(const struct boot_info *bi)
     check(placed, "modules page-aligned inside MODULE memory entries");
     check(zero_tail, "module page tails zeroed");
     check(selftest_ok, "self-test module content intact");
+    group_end();
+    kputs("Verified ");
+    put_dec(bi->module_count);
+    kputs(bi->module_count == 1 ? " module: " : " modules, first: ");
+    kputsn(m[0].string, sizeof(m[0].string));
+    kputs(", ");
+    put_dec(m[0].size);
+    kputs(" bytes\n");
 }
 
 static void check_efi_mmap(const struct boot_info *bi)
@@ -451,8 +535,76 @@ static void check_efi_mmap(const struct boot_info *bi)
           "raw EFI memory map present, in loader-reclaimable memory");
 }
 
+/* The colour of a loader status tag: "[  OK  ]", "[FAILED]", "[ WARN ]". */
+static uint8_t tag_color(const char *line, uint32_t len)
+{
+    static const struct { char text[7]; uint8_t color; } tags[] = {
+        {"  OK  ", COL_OK}, {"FAILED", COL_FAIL}, {" WARN ", COL_WARN},
+    };
+
+    if (len < 8 || line[0] != '[' || line[7] != ']')
+        return COL_TEXT;
+    for (unsigned t = 0; t < sizeof(tags) / sizeof(tags[0]); t++) {
+        unsigned i = 0;
+        while (i < 6 && line[1 + i] == tags[t].text[i])
+            i++;
+        if (i == 6)
+            return tags[t].color;
+    }
+    return COL_TEXT;
+}
+
+/* The loader's own messages continue on the kernel's screen, so the boot
+ * reads as one log. Serial already carried them, so screen only. */
+static void show_loader_log(const struct boot_info *bi)
+{
+    const char *log = (const char *)(bi->hhdm_base + bi->loader_log);
+    uint32_t start = 0;
+
+    if (bi->size < offsetof(struct boot_info, loader_log) + 12 || !bi->loader_log)
+        return;
+    for (uint32_t i = 0; i < bi->loader_log_size; i++) {
+        char c = log[i];
+
+        if (c == '\n') {
+            con_putc(c);
+            pace();
+            start = i + 1;
+            continue;
+        }
+        con_cur = (i - start >= 1 && i - start <= 6) ? tag_color(log + start, bi->loader_log_size - start)
+                                                     : COL_TEXT;
+        con_putc(c >= 0x20 && c < 0x7F ? c : '?');
+    }
+    con_cur = COL_TEXT;
+}
+
+static void check_loader_log(const struct boot_info *bi)
+{
+    static const char tail[] = "Starting kernel ...\n";
+    const char *log = (const char *)(bi->hhdm_base + bi->loader_log);
+    size_t n = sizeof(tail) - 1;
+    bool ok = bi->loader_log && bi->loader_log_size >= n;
+
+    for (size_t i = 0; ok && i < n; i++)
+        ok = log[bi->loader_log_size - n + i] == tail[i];
+    check(ok, "loader log handed over, ends with \"Starting kernel ...\"");
+}
+
+static void check_handover(const struct boot_info *bi)
+{
+    group_begin();
+    check_efi_mmap(bi);
+    check_loader_log(bi);
+    group_end();
+    kputs((bi->flags & BOOT_F_UEFI) ? "Verified EFI memory map and loader log\n" : "Verified loader log\n");
+}
+
 static void check_firmware_tables(const struct boot_info *bi)
 {
+    if (!bi->acpi_rsdp && !bi->smbios_entry)
+        return;
+    group_begin();
     if (bi->acpi_rsdp) {
         const char *p = (const char *)(bi->hhdm_base + bi->acpi_rsdp);
         bool ok = bi->acpi_rsdp + 8 <= bi->hhdm_size;
@@ -466,6 +618,10 @@ static void check_firmware_tables(const struct boot_info *bi)
                   p[0] == '_' && p[1] == 'S' && p[2] == 'M' && (p[3] == '_' || p[3] == '3');
         check(ok, "SMBIOS entry point readable through the HHDM");
     }
+    group_end();
+    kputs(bi->acpi_rsdp && bi->smbios_entry ? "Verified ACPI and SMBIOS entry points\n"
+          : bi->acpi_rsdp                   ? "Verified ACPI entry point\n"
+                                            : "Verified SMBIOS entry point\n");
 }
 
 static void print_info(const struct boot_info *bi, uint64_t tsc_kernel)
@@ -473,6 +629,7 @@ static void print_info(const struct boot_info *bi, uint64_t tsc_kernel)
     const struct boot_cpu *c = &bi->cpu;
     uint64_t hz = c->tsc_hz;
 
+    g_detail = true;
     kputs("loader         : MYBOOT ");
     kputsn(bi->loader_version, sizeof(bi->loader_version));
     kputs(", firmware ");
@@ -536,6 +693,7 @@ static void print_info(const struct boot_info *bi, uint64_t tsc_kernel)
     kputs("handoff jump   : ");
     put_dec(tsc_kernel - bi->tsc_handoff);
     kputs(" TSC ticks\n");
+    g_detail = false;
 }
 
 __attribute__((noreturn)) void kmain(const struct boot_info *bi, uint64_t entry_rsp)
@@ -545,12 +703,26 @@ __attribute__((noreturn)) void kmain(const struct boot_info *bi, uint64_t entry_
                  bi->size >= sizeof(*bi);
 
     serial_init();
-    if (valid)
+    if (valid) {
+        long ms = cmdline_num(bi, "log_delay=");
+
         con_init(bi); /* only trust framebuffer fields of a valid boot_info */
-    con_cur = COL_TITLE;
-    kputs("\nkernel: MYBOOT test kernel running\n");
-    con_cur = COL_TEXT;
+        if (ms > 0 && con_rows && fb_mapped(bi)) {
+            /* Release loaders may leave the frequency unknown: assume 2 GHz. */
+            g_screen = bi;
+            g_delay_ticks = (uint64_t)ms * ((bi->cpu.tsc_hz ? bi->cpu.tsc_hz : 2000000000ull) / 1000);
+        }
+        show_loader_log(bi);
+    }
     check(valid, "boot_info magic/version/size");
+    tag(valid);
+    kputs("Started MYBOOT test kernel");
+    if (valid) {
+        kputs(", boot_info ");
+        put_dec(bi->size);
+        kputs(" bytes");
+    }
+    kputc('\n');
     if (valid) {
         print_info(bi, tsc_kernel);
         check_machine_state(bi, entry_rsp);
@@ -558,14 +730,14 @@ __attribute__((noreturn)) void kmain(const struct boot_info *bi, uint64_t entry_
         check_memory_map(bi);
         check_firmware_tables(bi);
         check_modules(bi);
-        check_efi_mmap(bi);
+        check_handover(bi);
     }
-    con_cur = g_fail ? COL_FAIL : COL_OK;
-    kputs("kernel: ");
+    tag(!g_fail);
+    kputs("Finished self-test: ");
     put_dec(g_pass);
     kputs(" checks passed, ");
     put_dec(g_fail);
-    kputs(g_fail ? " FAILED\n" : " failed\n");
+    kputs(" failed\n");
     if (valid && con_rows && fb_mapped(bi))
         con_flush(bi);
 

@@ -9,6 +9,8 @@
 #                                          reports every check passed
 #   make test-all                          every scenario in tests/run.sh: config,
 #                                          fallback, menu, broken kernels
+#   make test-fs                           filesystem drivers on the host: every file of
+#                                          test images against 7-Zip, plus fuzzing
 #   make run-gdb                           like run, paused, gdbstub on :1234
 #   make iso                               build/$(CONFIG)/myboot.iso (UEFI, hybrid CD/USB)
 #   make run-iso                           boot that ISO in QEMU as a CD-ROM
@@ -78,6 +80,10 @@ SRCS := src/firmware/uefi/entry.c \
         src/firmware/uefi/report.c \
         src/firmware/uefi/menu.c \
         src/firmware/uefi/error.c \
+        src/firmware/uefi/chain.c \
+        src/firmware/uefi/volume.c \
+        src/fs/fs.c \
+        src/fs/ext4.c \
         src/config/config.c \
         src/cpu/cpu.c \
         src/memory/memmap.c \
@@ -104,7 +110,7 @@ HOSTCC ?= gcc
 MKISO  := build/tools/mkiso.exe
 ISO    := $(BUILD)/myboot.iso
 
-.PHONY: all configs size run run-gdb test test-all iso run-iso clean
+.PHONY: all configs size run run-gdb test test-all test-fs iso run-iso clean
 all: $(EFI) $(ESP_KERNEL) $(ESP_CFG) $(ESP_MOD)
 
 $(BUILD)/obj/%.obj: %.c Makefile
@@ -217,8 +223,45 @@ test: all
 	if [ $$code -eq 33 ]; then echo "TEST PASS ($(CONFIG))"; \
 	else echo "TEST FAIL ($(CONFIG)): qemu exit $$code"; exit 1; fi
 
-test-all: all
-	@CONFIG=$(CONFIG) QEMU="$(QEMU)" QEMU_SHARE="$(QEMU_SHARE)" QEMU_MEM=$(QEMU_MEM) sh tests/run.sh
+# A small EFI program the scenarios chainload (tests/efi/chaintest.c).
+CHAINTEST := $(BUILD)/chaintest/CHAINTEST.EFI
+$(CHAINTEST): $(BUILD)/obj/tests/efi/chaintest.obj
+	@mkdir -p $(dir $@)
+	$(LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 /out:$@ $<
+
+# LINUX_KERNEL / LINUX_INITRD: a Linux kernel with an EFI stub for the
+# Linux scenario; the default is the WSL kernel when installed. Skipped
+# when absent.
+LINUX_KERNEL ?= C:/Program Files/WSL/tools/kernel
+LINUX_INITRD ?= C:/Program Files/WSL/tools/initrd.img
+
+test-all: all $(CHAINTEST)
+	@CONFIG=$(CONFIG) QEMU="$(QEMU)" QEMU_SHARE="$(QEMU_SHARE)" QEMU_MEM=$(QEMU_MEM) \
+	  CHAINTEST="$(CHAINTEST)" LINUX_KERNEL="$(LINUX_KERNEL)" LINUX_INITRD="$(LINUX_INITRD)" \
+	  sh tests/run.sh
+
+# --- host tests of the filesystem drivers -------------------------------------
+# The driver (src/fs/) compiled for Windows, reading test images; tests/fs.py
+# compares every file with 7-Zip's extraction, tests/host/fuzz.py reads
+# corrupted images with AddressSanitizer and UBSan.
+PYTHON   ?= python
+FS_SRCS  := tests/host/ext4cat.c src/fs/ext4.c src/fs/fs.c
+FS_HOST  := build/host/ext4cat.exe
+FS_ASAN  := build/host/ext4cat-asan.exe
+FS_HOSTFLAGS := -O1 -g -Wall -Wextra -Werror -Iinclude -D_CRT_SECURE_NO_WARNINGS
+FUZZ_RUNS ?= 300
+
+$(FS_HOST): $(FS_SRCS) include/fs/*.h
+	@mkdir -p $(dir $@)
+	$(CC) $(FS_HOSTFLAGS) $(FS_SRCS) -o $@
+
+$(FS_ASAN): $(FS_SRCS) include/fs/*.h
+	@mkdir -p $(dir $@)
+	$(CC) $(FS_HOSTFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all $(FS_SRCS) -o $@
+
+test-fs: $(FS_HOST) $(FS_ASAN) $(KERNEL)
+	LINUX_KERNEL="$(LINUX_KERNEL)" $(PYTHON) tests/fs.py
+	$(PYTHON) tests/host/fuzz.py $(FUZZ_RUNS)
 
 clean:
 	rm -rf build

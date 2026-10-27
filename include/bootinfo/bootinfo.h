@@ -259,6 +259,9 @@ struct boot_info {
     uint32_t boot_entry;          /* 1-based BOOT.CFG entry booted; 0 = no BOOT.CFG */
     uint32_t reserved;
     char     boot_entry_title[64]; /* ASCII, NUL-terminated; empty without BOOT.CFG */
+    uint64_t loader_log;          /* phys of the loader's console output, 0 if none */
+    uint32_t loader_log_size;     /* bytes: ASCII, '\n' line ends, not NUL-terminated */
+    uint32_t reserved2;
 };
 
 /* ABI verification. A change here is a protocol version change. */
@@ -282,6 +285,7 @@ _Static_assert(sizeof(struct boot_module) == 128, "boot_module");
 _Static_assert(offsetof(struct boot_info, modules) == 416, "boot_info.modules");
 _Static_assert(offsetof(struct boot_info, efi_mmap) == 432, "boot_info.efi_mmap");
 _Static_assert(offsetof(struct boot_info, boot_entry) == 456, "boot_info.boot_entry");
-_Static_assert(sizeof(struct boot_info) == 528, "boot_info");
+_Static_assert(offsetof(struct boot_info, loader_log) == 528, "boot_info.loader_log");
+_Static_assert(sizeof(struct boot_info) == 544, "boot_info");
 
 #endif
