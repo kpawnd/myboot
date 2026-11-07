@@ -68,6 +68,7 @@ const struct acpi_info        *discover_acpi(void);   /* rsdp == 0 if absent */
 const struct smbios_info      *discover_smbios(void); /* entry == 0 if absent */
 const struct boot_framebuffer *discover_graphics(void); /* base == 0 if absent */
 const struct boot_device      *discover_storage(void);
+const struct boot_csme        *discover_csme(void);   /* vendor_id == 0 if none */
 bool uefi_phys_range_ok(uint64_t addr, uint64_t len);
 
 /* Volumes (volume.c): partitions and whole disks holding a filesystem the

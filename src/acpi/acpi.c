@@ -99,3 +99,15 @@ bool acpi_table_sig(uint64_t table, phys_range_ok_fn ok, char sig[4])
     memcpy(sig, (const void *)(uintptr_t)table, 4);
     return true;
 }
+
+uint64_t acpi_find_table(const struct acpi_info *a, const char sig[4], phys_range_ok_fn ok, uint32_t *len)
+{
+    for (uint32_t i = 0; i < a->count; i++) {
+        uint64_t t = acpi_table(a, i);
+        char s[4];
+
+        if (acpi_table_sig(t, ok, s) && !memcmp(s, sig, 4) && check_sdt(t, sig, ok, len) == ACPI_OK)
+            return t;
+    }
+    return 0;
+}

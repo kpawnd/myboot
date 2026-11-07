@@ -70,7 +70,7 @@
 #include <stdint.h>
 
 #define BOOT_INFO_MAGIC   0x4942544F4F42594DULL /* "MYBOOTBI" little-endian */
-#define BOOT_INFO_VERSION 1u
+#define BOOT_INFO_VERSION 2u /* 2: boot_info.csme */
 
 #define BOOT_HHDM_BASE    0xFFFF800000000000ULL
 #define BOOT_KERNEL_VMIN  0xFFFFFFFF80000000ULL
@@ -205,6 +205,44 @@ struct boot_device {
     uint8_t  partition_guid[16];  /* GPT unique partition GUID, or MBR signature */
 };
 
+/* Intel CSME (Converged Security and Management Engine), seen through its
+ * host interface HECI1 at PCI 00:16.0. vendor_id == 0 when no HECI device
+ * was visible: not an Intel CPU, the ME fused off, or HECI hidden by the
+ * firmware. The loader cannot tell those apart. */
+#define BOOT_CSME_PRESENT       (1u << 0) /* vendor_id, device_id, hfsts[] are valid */
+#define BOOT_CSME_INIT_COMPLETE (1u << 1) /* HFSTS1 bit 9 */
+#define BOOT_CSME_VERSION_VALID (1u << 2) /* fw_* are valid */
+
+/* boot_csme.version_status: how the firmware version query went */
+enum boot_csme_version {
+    BOOT_CSME_VER_NONE = 0,       /* not attempted: no CSME, or built without the query */
+    BOOT_CSME_VER_OK = 1,
+    BOOT_CSME_VER_NOT_NORMAL = 2, /* CSME not in normal state and mode: not asked */
+    BOOT_CSME_VER_NO_BAR = 3,     /* firmware assigned HECI no memory BAR */
+    BOOT_CSME_VER_NOT_READY = 4,  /* HECI link not ready on both sides */
+    BOOT_CSME_VER_BUSY = 5,       /* HECI buffers not empty: another message in flight */
+    BOOT_CSME_VER_TIMEOUT = 6,    /* no reply within 1 s */
+    BOOT_CSME_VER_BAD_REPLY = 7,  /* reply malformed or for another request */
+    BOOT_CSME_VER_REFUSED = 8     /* MKHI result code not 0 */
+};
+
+struct boot_csme {
+    uint16_t vendor_id;      /* 0x8086, or 0 if no HECI device */
+    uint16_t device_id;      /* HECI1 device ID: identifies the chipset */
+    uint32_t flags;          /* BOOT_CSME_* */
+    uint32_t hfsts[6];       /* raw firmware status registers HFSTS1-6 */
+    uint16_t fw_major;       /* firmware version major.minor.hotfix.build, */
+    uint16_t fw_minor;       /* as Intel tools and Linux fw_ver print it */
+    uint16_t fw_hotfix;
+    uint16_t fw_build;
+    uint8_t  revision_id;    /* PCI revision of HECI1 */
+    uint8_t  working_state;  /* HFSTS1[3:0]: 5 = normal */
+    uint8_t  op_mode;        /* HFSTS1[19:16]: 0 = normal */
+    uint8_t  error_code;     /* HFSTS1[15:12]: 0 = none */
+    uint8_t  version_status; /* enum boot_csme_version */
+    uint8_t  reserved[3];
+};
+
 /* A file loaded for the kernel ("module" line in BOOT.CFG): an initrd, a
  * driver, a font. Each module has its own page-aligned allocation; the
  * bytes after `size` up to the page end are zero. */
@@ -262,6 +300,7 @@ struct boot_info {
     uint64_t loader_log;          /* phys of the loader's console output, 0 if none */
     uint32_t loader_log_size;     /* bytes: ASCII, '\n' line ends, not NUL-terminated */
     uint32_t reserved2;
+    struct boot_csme        csme; /* Intel CSME; zero when none was visible */
 };
 
 /* ABI verification. A change here is a protocol version change. */
@@ -286,6 +325,9 @@ _Static_assert(offsetof(struct boot_info, modules) == 416, "boot_info.modules");
 _Static_assert(offsetof(struct boot_info, efi_mmap) == 432, "boot_info.efi_mmap");
 _Static_assert(offsetof(struct boot_info, boot_entry) == 456, "boot_info.boot_entry");
 _Static_assert(offsetof(struct boot_info, loader_log) == 528, "boot_info.loader_log");
-_Static_assert(sizeof(struct boot_info) == 544, "boot_info");
+_Static_assert(sizeof(struct boot_csme) == 48, "boot_csme");
+_Static_assert(offsetof(struct boot_csme, fw_major) == 32, "boot_csme.fw_major");
+_Static_assert(offsetof(struct boot_info, csme) == 544, "boot_info.csme");
+_Static_assert(sizeof(struct boot_info) == 592, "boot_info");
 
 #endif

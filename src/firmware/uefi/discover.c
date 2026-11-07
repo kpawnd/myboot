@@ -1,12 +1,19 @@
 /*
  * UEFI hardware/firmware discovery. Everything comes from firmware-provided
- * structures (memory map, configuration tables, GOP, device paths); no
- * device registers are touched. Each discover_*() runs once and caches.
+ * structures (memory map, configuration tables, GOP, device paths), except
+ * the CSME check, which reads PCI configuration space and may exchange one
+ * message with the CSME (src/csme/csme.c). Each discover_*() runs once and
+ * caches.
  *
- * Dependencies: memory <- acpi, smbios, graphics (pointer validation).
+ * Dependencies: memory <- acpi, smbios, graphics (pointer validation);
+ * cpu, acpi <- csme.
  */
 #include "firmware/uefi_boot.h"
+#include "core/config.h"
 #include "core/util.h"
+#include "arch/x86_64/cpu.h"
+#include "cpu/cpu.h"
+#include "csme/csme.h"
 #include "lib/mem.h"
 
 #define MMAP_SLACK_DESCS 32
@@ -289,4 +296,93 @@ const struct boot_device *discover_storage(void)
         g_dev.removable = bio->Media->RemovableMedia ? 1 : 0;
     }
     return &g_dev;
+}
+
+/* ---- Intel CSME: HECI1 at PCI 00:16.0 --------------------------------- */
+
+#define HECI_DEVFN   ((0x16u << 3) | 0)
+#define MCFG_ENTRIES 44 /* SDT header + 8 reserved bytes */
+#define MCFG_ENTRY   16
+
+static struct boot_csme g_csme;
+static bool g_csme_done;
+static uint64_t g_heci_ecam; /* HECI1's 4 KiB of ECAM, 0: use ports 0xCF8/0xCFC */
+
+/* ECAM base for segment 0, bus 0 from the ACPI MCFG table, 0 if none. */
+static uint64_t ecam_bus0(void)
+{
+    const struct acpi_info *a = discover_acpi();
+    uint32_t len;
+    uint64_t t = a->rsdp ? acpi_find_table(a, "MCFG", uefi_phys_range_ok, &len) : 0;
+
+    for (uint32_t off = MCFG_ENTRIES; t && off + MCFG_ENTRY <= len; off += MCFG_ENTRY) {
+        const uint8_t *e = (const uint8_t *)(uintptr_t)t + off;
+        if (rd16(e + 8) == 0 && e[10] == 0) /* segment 0, start bus 0 */
+            return rd64(e);
+    }
+    return 0;
+}
+
+/* Mechanism #1 uses two ports; TPL_HIGH_LEVEL keeps firmware timer events
+ * from reprogramming 0xCF8 between them. ECAM is one access, no lock. */
+static uint32_t heci_cfg_read32(uint16_t off)
+{
+    uint32_t v;
+    UINTN tpl;
+
+    if (g_heci_ecam)
+        return *(volatile uint32_t *)(uintptr_t)(g_heci_ecam + off);
+    tpl = g_uefi.bs->RaiseTPL(TPL_HIGH_LEVEL);
+    outl(0xCF8, 0x80000000u | (HECI_DEVFN << 8) | (off & 0xFC));
+    v = inl(0xCFC);
+    g_uefi.bs->RestoreTPL(tpl);
+    return v;
+}
+
+static void heci_cfg_write16(uint16_t off, uint16_t v)
+{
+    UINTN tpl;
+
+    if (g_heci_ecam) {
+        *(volatile uint16_t *)(uintptr_t)(g_heci_ecam + off) = v;
+        return;
+    }
+    tpl = g_uefi.bs->RaiseTPL(TPL_HIGH_LEVEL);
+    outl(0xCF8, 0x80000000u | (HECI_DEVFN << 8) | (off & 0xFC));
+    outw((uint16_t)(0xCFC + (off & 2)), v);
+    g_uefi.bs->RestoreTPL(tpl);
+}
+
+static uint32_t heci_mmio_read32(uint64_t addr) { return *(volatile uint32_t *)(uintptr_t)addr; }
+static void heci_mmio_write32(uint64_t addr, uint32_t v) { *(volatile uint32_t *)(uintptr_t)addr = v; }
+static void heci_delay_us(uint32_t us) { g_uefi.bs->Stall(us); }
+
+const struct boot_csme *discover_csme(void)
+{
+    static const struct csme_ops ops = {
+        heci_cfg_read32, heci_cfg_write16, heci_mmio_read32, heci_mmio_write32, heci_delay_us,
+    };
+    uint64_t ecam;
+
+    if (g_csme_done)
+        return &g_csme;
+    g_csme_done = true;
+    /* 00:16.0 is HECI only on Intel chipsets; elsewhere it may be some
+     * other device, which is left alone. */
+    if (memcmp(discover_cpu()->vendor, "GenuineIntel", 12) != 0)
+        return &g_csme;
+    if ((ecam = ecam_bus0()) != 0)
+        g_heci_ecam = ecam + ((uint64_t)HECI_DEVFN << 12);
+    csme_probe(&ops, &g_csme);
+#if BOOT_CSME_QUERY
+    /* The firmware's own HECI driver may run from timer events; at
+     * TPL_HIGH_LEVEL none can start mid-exchange. Stall is allowed at this
+     * level. A CSME that never answers holds it for the 1 s timeout. */
+    {
+        UINTN tpl = g_uefi.bs->RaiseTPL(TPL_HIGH_LEVEL);
+        csme_query_version(&ops, &g_csme);
+        g_uefi.bs->RestoreTPL(tpl);
+    }
+#endif
+    return &g_csme;
 }

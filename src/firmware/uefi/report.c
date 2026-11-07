@@ -9,6 +9,8 @@
 #if BOOT_LOG
 #include "core/prof.h"
 #include "firmware/uefi_console.h"
+#include "csme/csme.h"
+#include "lib/mem.h"
 #include "boot_state.h"
 
 static void blog_uefi_revision(uint32_t rev)
@@ -92,6 +94,93 @@ static void blog_us(uint64_t ticks, uint64_t hz)
     }
 }
 #endif
+
+static void blog_name(const char *name, const char *what, uint32_t v)
+{
+    if (name) {
+        blog_str(name);
+    } else {
+        blog_str(what);
+        blog_str(" ");
+        blog_dec(v);
+    }
+}
+
+/* PCI IDs are written as lspci does: 4 hex digits, no prefix. */
+static void blog_hex4(uint16_t v)
+{
+    char d[5];
+
+    for (int i = 3; i >= 0; i--, v >>= 4)
+        d[i] = "0123456789ABCDEF"[v & 0xF];
+    d[4] = 0;
+    blog_str(d);
+}
+
+static void report_csme(const struct boot_state *s)
+{
+    const struct boot_csme *c = s->csme;
+    bool normal = c->working_state == 5 && c->op_mode == 0;
+    const char *platform;
+
+    if (!(c->flags & BOOT_CSME_PRESENT)) {
+        if (!memcmp(s->cpu->vendor, "GenuineIntel", 12)) {
+            blog_str("No Intel CSME visible (HECI hidden or absent)");
+            blog_end(TAG_INFO);
+        } else if (BOOT_DEBUG) {
+            blog_str("No Intel CSME check: not an Intel CPU");
+            blog_end(TAG_INFO);
+        }
+        return;
+    }
+
+    blog_str("Detected Intel CSME: ");
+    if ((platform = csme_platform_name(c->device_id)) != NULL) {
+        blog_str(platform);
+        blog_str(" ");
+    }
+    blog_str("(HECI 8086:");
+    blog_hex4(c->device_id);
+    blog_str("), ");
+    blog_name(csme_state_name(c->working_state), "state", c->working_state);
+    if (c->op_mode != 0) {
+        blog_str(", mode: ");
+        blog_name(csme_mode_name(c->op_mode), "mode", c->op_mode);
+    }
+    if (c->error_code) {
+        blog_str(", error ");
+        blog_dec(c->error_code);
+    }
+    if (!(c->flags & BOOT_CSME_INIT_COMPLETE))
+        blog_str(", init not complete");
+    if (c->flags & BOOT_CSME_VERSION_VALID) {
+        blog_str(", firmware ");
+        blog_dec(c->fw_major);
+        blog_str(".");
+        blog_dec(c->fw_minor);
+        blog_str(".");
+        blog_dec(c->fw_hotfix);
+        blog_str(".");
+        blog_dec(c->fw_build);
+    }
+    blog_end(normal && !c->error_code ? TAG_OK : TAG_INFO);
+
+    if (c->version_status > BOOT_CSME_VER_NOT_NORMAL) {
+        blog_str("Intel CSME firmware version unavailable: ");
+        blog_str(csme_version_status_name(c->version_status));
+        blog_end(TAG_WARN);
+    }
+#if BOOT_DEBUG
+    blog_str("CSME status:");
+    for (unsigned i = 0; i < 6; i++) {
+        blog_str(" HFSTS");
+        blog_dec(i + 1);
+        blog_str("=");
+        blog_hex(c->hfsts[i]);
+    }
+    blog_end(TAG_INFO);
+#endif
+}
 
 void report_discovery(const struct boot_state *s)
 {
@@ -201,6 +290,8 @@ void report_discovery(const struct boot_state *s)
     if (dev->removable)
         blog_str(", removable");
     blog_end(TAG_OK);
+
+    report_csme(s);
 }
 
 void report_handoff(const struct boot_state *s)
@@ -238,7 +329,7 @@ void report_handoff(const struct boot_state *s)
         static const char *const names[PROF_COUNT] = {
             [PROF_CPU] = "cpu", [PROF_TSC_CAL] = "tsc-cal", [PROF_MEMORY] = "memory",
             [PROF_ACPI] = "acpi", [PROF_SMBIOS] = "smbios", [PROF_GRAPHICS] = "gop",
-            [PROF_STORAGE] = "storage", [PROF_CONFIG] = "config+menu", [PROF_KERNEL] = "kernel",
+            [PROF_STORAGE] = "storage", [PROF_CSME] = "csme", [PROF_CONFIG] = "config+menu", [PROF_KERNEL] = "kernel",
             [PROF_PAGING] = "handoff-prep",
         };
         blog_str("Timings:");

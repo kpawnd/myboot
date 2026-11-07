@@ -24,6 +24,7 @@ make run                               # boot that ESP in QEMU (window + serial)
 make test                              # one headless boot; passes on exit status 33
 make test-all                          # every scenario in tests/run.sh
 make test-fs                           # filesystem driver on the host (needs Python, 7-Zip)
+make test-csme                         # CSME detection on the host, simulated device
 make iso                               # build/$CONFIG/myboot.iso, hybrid CD/USB image
 make size                              # binary sizes
 ```
@@ -177,6 +178,60 @@ Booting the selected entry in 10 s. Press any key to stop.
   open firmware setup, reboot or power off. After 10 s without a key it
   returns to the firmware, so an unattended machine still moves on to its
   next boot option.
+
+## Intel CSME detection
+
+On Intel CPUs the loader looks for the Converged Security and Management
+Engine through its host interface, HECI1 (PCI `00:16.0`). It reports what it
+finds in the boot log and in `boot_info.csme`:
+
+```
+[  OK  ] Detected Intel CSME: Tiger Lake-LP (HECI 8086:A0E0), normal, firmware 15.0.42.2235
+[ INFO ] Detected Intel CSME: Alder Lake-P (HECI 8086:51E0), normal, mode: soft temporary disable
+[ INFO ] No Intel CSME visible (HECI hidden or absent)
+[ WARN ] Intel CSME firmware version unavailable: no reply within 1 s
+```
+
+It works in two steps:
+
+1. **Status, read-only.** The loader reads configuration space through ECAM
+   (from the ACPI `MCFG` table), or through ports `0xCF8`/`0xCFC` when there is
+   no MCFG. This gives the device ID, which names the chipset, and the
+   firmware status registers HFSTS1-6. From HFSTS1 the loader decodes the
+   working state, operating mode, error code and whether init is complete.
+   `boot_info.csme.hfsts[]` holds all six raw registers.
+2. **Firmware version, one message.** If the CSME is in normal state and
+   normal mode, the loader sends one MKHI `GET_FW_VERSION` request over HECI
+   and reads the reply. This is the only step that writes to the device, and
+   it has limits:
+   - It uses only a memory BAR the firmware already assigned.
+   - It uses the link only if the firmware left both sides ready and both
+     buffers empty. It never resets the link.
+   - If memory decoding was off, it turns it on for the exchange and then
+     restores the Command register.
+
+   Any failure, including no reply within 1 s, leaves the version unknown.
+   The log line says why, and booting continues. To drop this step and keep
+   only the read-only status, run `make clean` and then
+   `make CSME_QUERY=0`.
+
+Limits:
+
+- "No Intel CSME visible" can mean the CSME is fused off, the firmware hid
+  HECI1 (a common BIOS option), or the platform has none. The loader cannot
+  tell these apart.
+- Some firmware closes the MKHI fixed-address client after End-of-POST. On
+  those machines the version query fails with "request refused" or a
+  timeout, and the status from step 1 is still reported.
+- HFSTS1 bit 4 means manufacturing mode on older CSMEs and SPI protection
+  on newer ones, so the loader does not decode it. The raw value is in
+  `hfsts[0]`.
+- Chipset names come from a short table of HECI device IDs from Linux's
+  `hw-me-regs.h`. Other IDs show only the hex ID.
+- QEMU has no HECI device, so `make test-all` only covers the "not visible"
+  path. `make test-csme` covers the rest against a simulated device.
+  Results on real hardware are unverified. To check them under Linux, compare
+  with `/sys/class/mei/mei0/fw_ver` and `fw_status`.
 
 ## Running it on a real PC
 

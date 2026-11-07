@@ -624,6 +624,47 @@ static void check_firmware_tables(const struct boot_info *bi)
                                             : "Verified SMBIOS entry point\n");
 }
 
+/* The CSME report must be self-consistent: all zero when no HECI was
+ * seen, and a version only alongside a device and a successful query. */
+static void check_csme(const struct boot_info *bi)
+{
+    const struct boot_csme *c = &bi->csme;
+    const uint8_t *raw = (const uint8_t *)c;
+    bool zero = true;
+
+    for (size_t i = 0; i < sizeof(*c); i++)
+        zero = zero && raw[i] == 0;
+    group_begin();
+    if (!(c->flags & BOOT_CSME_PRESENT)) {
+        check(zero, "CSME report all zero when no HECI device was seen");
+    } else {
+        check(c->vendor_id == 0x8086 && c->device_id != 0, "CSME report has Intel HECI IDs");
+        check(c->working_state == (c->hfsts[0] & 0xF) && c->op_mode == ((c->hfsts[0] >> 16) & 0xF),
+              "CSME state and mode match raw HFSTS1");
+    }
+    check(!(c->flags & BOOT_CSME_VERSION_VALID) ||
+              ((c->flags & BOOT_CSME_PRESENT) && c->version_status == BOOT_CSME_VER_OK),
+          "CSME version only with a device and a successful query");
+    group_end();
+    if (!(c->flags & BOOT_CSME_PRESENT)) {
+        kputs("Verified CSME report: no HECI device\n");
+        return;
+    }
+    kputs("Verified CSME report: HECI ");
+    put_hex(c->device_id, 4);
+    if (c->flags & BOOT_CSME_VERSION_VALID) {
+        kputs(", firmware ");
+        put_dec(c->fw_major);
+        kputc('.');
+        put_dec(c->fw_minor);
+        kputc('.');
+        put_dec(c->fw_hotfix);
+        kputc('.');
+        put_dec(c->fw_build);
+    }
+    kputc('\n');
+}
+
 static void print_info(const struct boot_info *bi, uint64_t tsc_kernel)
 {
     const struct boot_cpu *c = &bi->cpu;
@@ -729,6 +770,7 @@ __attribute__((noreturn)) void kmain(const struct boot_info *bi, uint64_t entry_
         check_mappings(bi);
         check_memory_map(bi);
         check_firmware_tables(bi);
+        check_csme(bi);
         check_modules(bi);
         check_handover(bi);
     }

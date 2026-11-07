@@ -6,6 +6,9 @@
  *   BOOT_LOG      diagnostic console output (banner, discovery summary)
  *   BOOT_DEBUG    verbose output and assertions
  *   BOOT_PROFILE  TSC timing points
+ *   BOOT_CSME_QUERY  ask the Intel CSME its firmware version over HECI
+ *                    (on by default; -DBOOT_CSME_QUERY=0 keeps the CSME
+ *                    check to reading PCI configuration space)
  *
  * Code under a disabled switch must compile away completely: release images
  * contain no logging strings, no formatting code and no timing state.
@@ -30,6 +33,10 @@
 #  define BOOT_PROFILE 0
 #else
 #  error "define one of BOOT_CONFIG_DEBUG, BOOT_CONFIG_BALANCED, BOOT_CONFIG_RELEASE"
+#endif
+
+#ifndef BOOT_CSME_QUERY
+#  define BOOT_CSME_QUERY 1
 #endif
 
 #endif

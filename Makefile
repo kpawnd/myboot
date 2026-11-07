@@ -11,6 +11,8 @@
 #                                          fallback, menu, broken kernels
 #   make test-fs                           filesystem drivers on the host: every file of
 #                                          test images against 7-Zip, plus fuzzing
+#   make test-csme                         CSME detection on the host, against a
+#                                          simulated HECI device
 #   make run-gdb                           like run, paused, gdbstub on :1234
 #   make iso                               build/$(CONFIG)/myboot.iso (UEFI, hybrid CD/USB)
 #   make run-iso                           boot that ISO in QEMU as a CD-ROM
@@ -44,6 +46,12 @@ CFLAGS := --target=x86_64-unknown-windows -std=c11 -ffreestanding \
           -mgeneral-regs-only -fshort-wchar \
           -fno-asynchronous-unwind-tables -fno-unwind-tables \
           -Wall -Wextra -Werror -Iinclude -MMD -MP
+
+# CSME_QUERY=0: the CSME check only reads PCI configuration space and never
+# sends the firmware version request (see README). Run make clean after
+# changing it: objects do not depend on command-line variables.
+CSME_QUERY ?= 1
+CFLAGS += -DBOOT_CSME_QUERY=$(CSME_QUERY)
 
 # /subsystem:efi_application : PE subsystem 10, what firmware requires.
 # /entry:efi_main            : no CRT startup; firmware calls us directly.
@@ -89,6 +97,7 @@ SRCS := src/firmware/uefi/entry.c \
         src/memory/memmap.c \
         src/acpi/acpi.c \
         src/smbios/smbios.c \
+        src/csme/csme.c \
         src/elf/elf.c \
         src/arch/x86_64/paging.c \
         src/arch/x86_64/handoff.S \
@@ -110,7 +119,7 @@ HOSTCC ?= gcc
 MKISO  := build/tools/mkiso.exe
 ISO    := $(BUILD)/myboot.iso
 
-.PHONY: all configs size run run-gdb test test-all test-fs iso run-iso clean
+.PHONY: all configs size run run-gdb test test-all test-fs test-csme iso run-iso clean
 all: $(EFI) $(ESP_KERNEL) $(ESP_CFG) $(ESP_MOD)
 
 $(BUILD)/obj/%.obj: %.c Makefile
@@ -262,6 +271,29 @@ $(FS_ASAN): $(FS_SRCS) include/fs/*.h
 test-fs: $(FS_HOST) $(FS_ASAN) $(KERNEL)
 	LINUX_KERNEL="$(LINUX_KERNEL)" $(PYTHON) tests/fs.py
 	$(PYTHON) tests/host/fuzz.py $(FUZZ_RUNS)
+
+# --- host test of the CSME detection ------------------------------------------
+# src/csme/ compiled for Windows against a simulated HECI device: config
+# space, the HECI registers and an ME that answers (or does not).
+CSME_SRCS := tests/host/csmetest.c src/csme/csme.c
+CSME_HOST := build/host/csmetest.exe
+CSME_ASAN := build/host/csmetest-asan.exe
+
+$(CSME_HOST): $(CSME_SRCS) include/csme/csme.h include/bootinfo/bootinfo.h
+	@mkdir -p $(dir $@)
+	$(CC) $(FS_HOSTFLAGS) $(CSME_SRCS) -o $@
+
+$(CSME_ASAN): $(CSME_SRCS) include/csme/csme.h include/bootinfo/bootinfo.h
+	@mkdir -p $(dir $@)
+	$(CC) $(FS_HOSTFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all $(CSME_SRCS) -o $@
+
+# The sanitizer runtime is a DLL next to clang's other libraries (found the
+# way tests/host/fuzz.py finds it: clang itself need not be on the shell's PATH).
+LLVM_DIR ?= C:/Program Files/LLVM
+test-csme: $(CSME_HOST) $(CSME_ASAN)
+	$(CSME_HOST)
+	for d in "$(LLVM_DIR)"/lib/clang/*/lib/windows; do PATH="$$(cygpath -u "$$d"):$$PATH"; done; \
+	$(CSME_ASAN)
 
 clean:
 	rm -rf build

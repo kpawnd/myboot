@@ -458,6 +458,7 @@ static void fill_boot_info(struct boot_info *bi, const char *cmdline, uint64_t t
     bi->cpu = *S.cpu;
     bi->framebuffer = *S.fb;
     bi->boot_device = *S.dev;
+    bi->csme = *S.csme;
 
     memset(S.bmods, 0, (uint64_t)S.nmod * sizeof(struct boot_module));
     for (uint32_t i = 0; i < S.nmod; i++) {
@@ -622,6 +623,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     PROF_MARK(PROF_GRAPHICS);
     S.dev = discover_storage();
     PROF_MARK(PROF_STORAGE);
+    S.csme = discover_csme();
+    PROF_MARK(PROF_CSME);
 #if BOOT_LOG
     report_discovery(&S);
 #endif

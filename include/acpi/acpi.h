@@ -23,5 +23,8 @@ enum acpi_error acpi_parse(uint64_t rsdp, phys_range_ok_fn ok, struct acpi_info 
 uint64_t acpi_table(const struct acpi_info *a, uint32_t index);
 /* Copies the 4-byte signature of the table at `table`; false if unreadable. */
 bool acpi_table_sig(uint64_t table, phys_range_ok_fn ok, char sig[4]);
+/* The first table with signature `sig` whose header, length and checksum
+ * are valid, and its length in *len; 0 if none. */
+uint64_t acpi_find_table(const struct acpi_info *a, const char sig[4], phys_range_ok_fn ok, uint32_t *len);
 
 #endif

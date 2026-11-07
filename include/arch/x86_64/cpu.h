@@ -51,6 +51,11 @@ static inline void wrmsr(uint32_t msr, uint64_t v)
     __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)) : "memory");
 }
 
+/* Port I/O, for PCI configuration mechanism #1 (ports 0xCF8/0xCFC). */
+static inline void outw(uint16_t port, uint16_t v) { __asm__ volatile("outw %0, %1" : : "a"(v), "Nd"(port)); }
+static inline void outl(uint16_t port, uint32_t v) { __asm__ volatile("outl %0, %1" : : "a"(v), "Nd"(port)); }
+static inline uint32_t inl(uint16_t port) { uint32_t v; __asm__ volatile("inl %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+
 static inline void cpu_cli(void) { __asm__ volatile("cli" : : : "memory"); }
 
 /* Stop forever without spinning: HLT sleeps until the next interrupt, then

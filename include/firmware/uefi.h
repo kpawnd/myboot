@@ -88,11 +88,14 @@ typedef struct {
     uint64_t Attribute;
 } EFI_MEMORY_DESCRIPTOR;
 
+/* 7.1.8 RaiseTPL: TPL_HIGH_LEVEL masks every event, including the timer */
+#define TPL_HIGH_LEVEL 31
+
 /* 4.4 EFI_BOOT_SERVICES */
 typedef struct {
     EFI_TABLE_HEADER Hdr;
-    void *RaiseTPL;
-    void *RestoreTPL;
+    UINTN (EFIAPI *RaiseTPL)(UINTN NewTpl);
+    void (EFIAPI *RestoreTPL)(UINTN OldTpl);
     EFI_STATUS (EFIAPI *AllocatePages)(uint32_t Type, uint32_t MemoryType, UINTN Pages,
                                        EFI_PHYSICAL_ADDRESS *Memory);
     EFI_STATUS (EFIAPI *FreePages)(EFI_PHYSICAL_ADDRESS Memory, UINTN Pages);
