@@ -106,20 +106,78 @@ static void blog_name(const char *name, const char *what, uint32_t v)
     }
 }
 
-/* PCI IDs are written as lspci does: 4 hex digits, no prefix. */
-static void blog_hex4(uint16_t v)
+/* Fixed-width uppercase hex, no prefix: PCI IDs as lspci writes them. */
+static void blog_hexn(uint32_t v, int digits)
 {
-    char d[5];
+    char d[9];
 
-    for (int i = 3; i >= 0; i--, v >>= 4)
+    for (int i = digits - 1; i >= 0; i--, v >>= 4)
         d[i] = "0123456789ABCDEF"[v & 0xF];
-    d[4] = 0;
+    d[digits] = 0;
     blog_str(d);
+}
+
+static void blog_fw_version(const struct boot_csme *c)
+{
+    blog_dec(c->fw_major);
+    blog_str(".");
+    blog_dec(c->fw_minor);
+    blog_str(".");
+    blog_dec(c->fw_hotfix);
+    blog_str(".");
+    blog_dec(c->fw_build);
+}
+
+#if BOOT_DEBUG
+/* 8-4-4-4-12, the first three fields little-endian on the wire */
+static void blog_uuid(const uint8_t u[16])
+{
+    blog_hexn(u[0] | (u[1] << 8) | (u[2] << 16) | ((uint32_t)u[3] << 24), 8);
+    blog_str("-");
+    blog_hexn(u[4] | (u[5] << 8), 4);
+    blog_str("-");
+    blog_hexn(u[6] | (u[7] << 8), 4);
+    blog_str("-");
+    for (int i = 8; i < 16; i++) {
+        if (i == 10)
+            blog_str("-");
+        blog_hexn(u[i], 2);
+    }
+}
+#endif
+
+/* "N clients (MKHI, AMTHI, 3 unnamed)" */
+static void blog_csme_clients(const struct boot_csme *c, const struct csme_clients *cl)
+{
+    unsigned unnamed = c->client_count - cl->count;
+    const char *sep = " (";
+
+    blog_dec(c->client_count);
+    blog_str(c->client_count == 1 ? " client" : " clients");
+    for (uint32_t i = 0; i < cl->count; i++) {
+        const char *name = csme_client_name(cl->c[i].uuid);
+        if (!name) {
+            unnamed++;
+            continue;
+        }
+        blog_str(sep);
+        blog_str(name);
+        sep = ", ";
+    }
+    if (unnamed) {
+        blog_str(sep);
+        blog_dec(unnamed);
+        blog_str(" unnamed");
+        sep = ", ";
+    }
+    if (sep[0] == ',')
+        blog_str(")");
 }
 
 static void report_csme(const struct boot_state *s)
 {
     const struct boot_csme *c = s->csme;
+    const struct csme_clients *cl = s->csme_clients;
     bool normal = c->working_state == 5 && c->op_mode == 0;
     const char *platform;
 
@@ -140,7 +198,7 @@ static void report_csme(const struct boot_state *s)
         blog_str(" ");
     }
     blog_str("(HECI 8086:");
-    blog_hex4(c->device_id);
+    blog_hexn(c->device_id, 4);
     blog_str("), ");
     blog_name(csme_state_name(c->working_state), "state", c->working_state);
     if (c->op_mode != 0) {
@@ -155,20 +213,44 @@ static void report_csme(const struct boot_state *s)
         blog_str(", init not complete");
     if (c->flags & BOOT_CSME_VERSION_VALID) {
         blog_str(", firmware ");
-        blog_dec(c->fw_major);
-        blog_str(".");
-        blog_dec(c->fw_minor);
-        blog_str(".");
-        blog_dec(c->fw_hotfix);
-        blog_str(".");
-        blog_dec(c->fw_build);
+        blog_fw_version(c);
     }
     blog_end(normal && !c->error_code ? TAG_OK : TAG_INFO);
 
-    if (c->version_status > BOOT_CSME_VER_NOT_NORMAL) {
-        blog_str("Intel CSME firmware version unavailable: ");
-        blog_str(csme_version_status_name(c->version_status));
+    /* A failure the other path made up for is only information. */
+    if (c->version_status > BOOT_CSME_ST_NOT_NORMAL) {
+        blog_str("Intel CSME did not answer at MKHI's fixed address: ");
+        blog_str(csme_status_name(c->version_status));
+        blog_end(c->flags & BOOT_CSME_VERSION_VALID ? TAG_INFO : TAG_WARN);
+    }
+    if (c->hbm_status == BOOT_CSME_ST_OK) {
+        blog_str("Talked to Intel CSME over HBM ");
+        blog_dec(cl->hbm_major);
+        blog_str(".");
+        blog_dec(cl->hbm_minor);
+        blog_str(": ");
+        blog_csme_clients(c, cl);
+        blog_end(TAG_OK);
+    } else if (c->hbm_status > BOOT_CSME_ST_NOT_NORMAL) {
+        blog_str("Intel CSME HBM session failed: ");
+        blog_str(csme_status_name(c->hbm_status));
+        if (c->client_count) {
+            blog_str(", after ");
+            blog_csme_clients(c, cl);
+        }
         blog_end(TAG_WARN);
+    }
+    if (c->mkhi_status == BOOT_CSME_ST_OK) {
+        blog_str("Intel CSME MKHI client answered over HBM: firmware ");
+        blog_fw_version(c);
+        blog_end(TAG_OK);
+    } else if (c->mkhi_status > BOOT_CSME_ST_NOT_NORMAL) {
+        blog_str("Intel CSME MKHI client did not answer over HBM: ");
+        blog_str(csme_status_name(c->mkhi_status));
+        blog_end(TAG_WARN);
+    } else if (c->hbm_status == BOOT_CSME_ST_OK) {
+        blog_str("Intel CSME lists no MKHI client");
+        blog_end(TAG_INFO);
     }
 #if BOOT_DEBUG
     blog_str("CSME status:");
@@ -179,6 +261,31 @@ static void report_csme(const struct boot_state *s)
         blog_hex(c->hfsts[i]);
     }
     blog_end(TAG_INFO);
+    for (uint32_t i = 0; i < cl->count; i++) {
+        const struct csme_client *e = &cl->c[i];
+        const char *name = csme_client_name(e->uuid);
+
+        blog_str("CSME client ");
+        blog_dec(e->addr);
+        blog_str(": ");
+        blog_uuid(e->uuid);
+        if (name) {
+            blog_str(" ");
+            blog_str(name);
+        }
+        if (e->fixed_address) {
+            blog_str(", fixed address ");
+            blog_dec(e->fixed_address);
+        }
+        blog_str(", protocol ");
+        blog_dec(e->protocol_version);
+        blog_str(", ");
+        blog_dec(e->max_connections);
+        blog_str(" connections, messages up to ");
+        blog_dec(e->max_msg_length);
+        blog_str(" bytes");
+        blog_end(TAG_INFO);
+    }
 #endif
 }
 

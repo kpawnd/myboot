@@ -69,6 +69,7 @@ const struct smbios_info      *discover_smbios(void); /* entry == 0 if absent */
 const struct boot_framebuffer *discover_graphics(void); /* base == 0 if absent */
 const struct boot_device      *discover_storage(void);
 const struct boot_csme        *discover_csme(void);   /* vendor_id == 0 if none */
+const struct csme_clients     *discover_csme_clients(void);
 bool uefi_phys_range_ok(uint64_t addr, uint64_t len);
 
 /* Volumes (volume.c): partitions and whole disks holding a filesystem the

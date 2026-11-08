@@ -305,6 +305,7 @@ const struct boot_device *discover_storage(void)
 #define MCFG_ENTRY   16
 
 static struct boot_csme g_csme;
+static struct csme_clients g_csme_clients;
 static bool g_csme_done;
 static uint64_t g_heci_ecam; /* HECI1's 4 KiB of ECAM, 0: use ports 0xCF8/0xCFC */
 
@@ -377,12 +378,19 @@ const struct boot_csme *discover_csme(void)
 #if BOOT_CSME_QUERY
     /* The firmware's own HECI driver may run from timer events; at
      * TPL_HIGH_LEVEL none can start mid-exchange. Stall is allowed at this
-     * level. A CSME that never answers holds it for the 1 s timeout. */
+     * level. A CSME that never answers holds it for each 1 s timeout. */
     {
         UINTN tpl = g_uefi.bs->RaiseTPL(TPL_HIGH_LEVEL);
         csme_query_version(&ops, &g_csme);
+        csme_hbm_session(&ops, &g_csme, &g_csme_clients);
         g_uefi.bs->RestoreTPL(tpl);
     }
 #endif
     return &g_csme;
+}
+
+/* What the HBM session found; count == 0 before discover_csme or without one. */
+const struct csme_clients *discover_csme_clients(void)
+{
+    return &g_csme_clients;
 }

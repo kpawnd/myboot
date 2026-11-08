@@ -625,7 +625,8 @@ static void check_firmware_tables(const struct boot_info *bi)
 }
 
 /* The CSME report must be self-consistent: all zero when no HECI was
- * seen, and a version only alongside a device and a successful query. */
+ * seen, a version only alongside a device and a successful query, and
+ * clients only from an HBM session that got as far as enumerating. */
 static void check_csme(const struct boot_info *bi)
 {
     const struct boot_csme *c = &bi->csme;
@@ -643,8 +644,11 @@ static void check_csme(const struct boot_info *bi)
               "CSME state and mode match raw HFSTS1");
     }
     check(!(c->flags & BOOT_CSME_VERSION_VALID) ||
-              ((c->flags & BOOT_CSME_PRESENT) && c->version_status == BOOT_CSME_VER_OK),
+              ((c->flags & BOOT_CSME_PRESENT) &&
+               (c->version_status == BOOT_CSME_ST_OK || c->mkhi_status == BOOT_CSME_ST_OK)),
           "CSME version only with a device and a successful query");
+    check((c->client_count == 0 && c->mkhi_status == BOOT_CSME_ST_NONE) || c->hbm_status != BOOT_CSME_ST_NONE,
+          "CSME clients only from an HBM session");
     group_end();
     if (!(c->flags & BOOT_CSME_PRESENT)) {
         kputs("Verified CSME report: no HECI device\n");
@@ -661,6 +665,11 @@ static void check_csme(const struct boot_info *bi)
         put_dec(c->fw_hotfix);
         kputc('.');
         put_dec(c->fw_build);
+    }
+    if (c->client_count) {
+        kputs(", ");
+        put_dec(c->client_count);
+        kputs(" ME clients");
     }
     kputc('\n');
 }

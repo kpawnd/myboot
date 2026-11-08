@@ -624,6 +624,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     S.dev = discover_storage();
     PROF_MARK(PROF_STORAGE);
     S.csme = discover_csme();
+    S.csme_clients = discover_csme_clients();
     PROF_MARK(PROF_CSME);
 #if BOOT_LOG
     report_discovery(&S);

@@ -195,7 +195,7 @@ expect_boot shipped "MYBOOT boot menu" "boot entry     : 1 (Test kernel with sel
     "Loaded module \\EFI\\MYBOOT\\SELFTEST.MOD (170 bytes)" \
     "Command line: selftest modules=1" "Starting kernel ..." \
     "Read configuration \\EFI\\MYBOOT\\BOOT.CFG (2 entries)" \
-    "Finished self-test: 33 checks passed, 0 failed"
+    "Finished self-test: 34 checks passed, 0 failed"
 
 # No BOOT.CFG: the built-in default entry, no modules.
 esp no-config > /dev/null
@@ -466,7 +466,7 @@ EOF
 DISK=$EXT4_IMG expect_boot ext4-label \
     "Found volume label=myboot-ext4 (ext4, PARTUUID $EXT4_PARTUUID)" \
     "Loaded kernel /vmlinuz-myboot (" "Loaded module /boot/selftest.mod (170 bytes)" \
-    "Finished self-test: 33 checks passed, 0 failed"
+    "Finished self-test: 34 checks passed, 0 failed"
 DISK=
 
 d=$(esp ext2-partuuid)
@@ -479,7 +479,7 @@ module /boot/selftest.mod selftest
 EOF
 DISK=$EXT2_IMG expect_boot ext2-partuuid \
     "Found volume partuuid=0BADF00D-01 (ext4, PARTUUID 0badf00d-01)" \
-    "Loaded kernel /boot/kernel.elf (" "Finished self-test: 33 checks passed, 0 failed"
+    "Loaded kernel /boot/kernel.elf (" "Finished self-test: 34 checks passed, 0 failed"
 DISK=
 
 # An entry whose volume is missing falls back, and so does one whose file

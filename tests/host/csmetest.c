@@ -1,9 +1,11 @@
 /*
  * Host test for src/csme/csme.c: runs csme_probe and csme_query_version
- * against a simulated HECI1 device. The simulation holds 256 bytes of
- * configuration space and the four HECI registers, and an ME that answers
- * GET_FW_VERSION the way a test case asks (correctly, never, with an error
- * result, with a reply for someone else).
+ * and csme_hbm_session against a simulated HECI1 device. The simulation
+ * holds 256 bytes of configuration space and the four HECI registers, and
+ * an ME that answers GET_FW_VERSION at MKHI's fixed address the way a test
+ * case asks (correctly, never, with an error result, with a reply for
+ * someone else), and speaks HBM: start, enumerate, client properties,
+ * connect with flow control, disconnect, stop.
  *
  * Besides each case's result, every case checks what the code must never
  * do: touch MMIO while memory decoding is off, write any configuration
@@ -24,7 +26,11 @@
 #define CSR_IG    (1u << 2)
 #define CSR_RDY   (1u << 3)
 
+/* How the fixed-address MKHI answers. REPLY_REFUSED goes for MKHI over HBM
+ * too: it is the same firmware saying no. */
 enum reply { REPLY_OK, REPLY_NONE, REPLY_REFUSED, REPLY_WRONG_CLIENT };
+
+#define MKHI_AT 7 /* the simulated ME's MKHI client address */
 
 static struct sim {
     uint8_t  cfg[256];
@@ -32,6 +38,12 @@ static struct sim {
     uint32_t hbuf[DEPTH], hn;      /* host -> ME, not yet consumed */
     uint32_t mbuf[DEPTH], mr, mw;  /* ME -> host */
     enum reply reply;
+    bool hbm_silent;               /* the ME ignores HBM */
+    bool mkhi_connect;             /* MKHI is not fixed-address: connect first */
+    bool early_flow;               /* flow-control grant before the connect response */
+    bool stop_silent;              /* no HOST_STOP answer, as on Arrow Lake */
+    bool started, connected, host_credit, stopped;
+    unsigned mkhi_hbm_answered;
     uint16_t cmd_initial;
     unsigned mmio_while_off, cfg_bad_writes, mmio_writes, is_cleared;
     uint64_t waited_us;
@@ -58,25 +70,107 @@ static uint32_t csr(uint32_t flags, uint32_t rp, uint32_t wp)
 
 static void me_send(uint32_t v) { S.mbuf[S.mw++ % DEPTH] = v; }
 
-/* The ME reads the host buffer when the host sets IG. */
-static void me_process(void)
+static void me_msg(uint8_t me, uint8_t host, const uint32_t *d, uint32_t len)
 {
-    uint32_t hdr = S.hbuf[0], mkhi = S.hbuf[1];
-    uint8_t me = S.reply == REPLY_WRONG_CLIENT ? 0x08 : 0x07;
-
-    if (S.hn != 2 || hdr != (0x07u | (4u << 16) | (1u << 31)) || mkhi != 0x02FFu || S.reply == REPLY_NONE) {
-        S.hn = 0;
-        return;
-    }
-    S.hn = 0;
-    me_send(me | (28u << 16) | (1u << 31));
-    me_send(0x82FFu | (S.reply == REPLY_REFUSED ? 0x89u << 24 : 0));
-    me_send(1 | (16u << 16));    /* minor 1, major 16, platform 0 */
-    me_send(2307 | (30u << 16)); /* build 2307, hotfix 30 */
-    for (int i = 0; i < 4; i++)  /* recovery and FITC blocks */
-        me_send(0xEEEEEEEE);
+    me_send(me | ((uint32_t)host << 8) | (len << 16) | (1u << 31));
+    for (uint32_t i = 0; i < (len + 3) / 4; i++)
+        me_send(d[i]);
     S.me_csr |= CSR_IS;
     S.host_csr |= CSR_IS;
+}
+
+static void me_version(uint8_t me, uint8_t host)
+{
+    uint32_t d[7] = {0x82FFu | (S.reply == REPLY_REFUSED ? 0x89u << 24 : 0),
+                     1 | (16u << 16),    /* minor 1, major 16, platform 0 */
+                     2307 | (30u << 16), /* build 2307, hotfix 30 */
+                     0xEEEEEEEE, 0xEEEEEEEE, 0xEEEEEEEE, 0xEEEEEEEE}; /* recovery, FITC */
+    me_msg(me, host, d, 28);
+}
+
+/* The simulated ME's clients: AMTHI, MKHI, and one nobody named. */
+static const struct { uint8_t addr; uint32_t uuid[4]; } clients[] = {
+    {2, {0x12f80028, 0x4b2db4b7, 0xe046a8ac, 0x4c8165ff}},
+    {MKHI_AT, {0x55213584, 0x49169a29, 0xb70fdfba, 0xeb2a68ed}},
+    {40, {0x01020304, 0x05060708, 0x090a0b0c, 0x0d0e0f10}},
+};
+
+static void me_hbm(const uint32_t *d)
+{
+    uint8_t cmd = (uint8_t)d[0], me = (uint8_t)(d[0] >> 8);
+    uint32_t r[9] = {0};
+
+    r[0] = cmd | 0x80u;
+    switch (cmd) {
+    case 0x01: /* start: the ME speaks 2.2 and takes the host's version */
+        S.started = true;
+        r[0] |= (2u << 8) | (2u << 16) | (1u << 24);
+        me_msg(0, 0, r, 4);
+        break;
+    case 0x02:
+        S.stopped = true;
+        if (!S.stop_silent)
+            me_msg(0, 0, r, 4);
+        break;
+    case 0x04:
+        for (unsigned i = 0; i < 3; i++)
+            r[1 + clients[i].addr / 32] |= 1u << (clients[i].addr % 32);
+        me_msg(0, 0, r, 36);
+        break;
+    case 0x05:
+        r[0] |= (uint32_t)me << 8;
+        for (unsigned i = 0; i < 3; i++)
+            if (clients[i].addr == me) {
+                memcpy(&r[1], clients[i].uuid, 16);
+                r[5] = 1 | (1u << 8) | ((me == MKHI_AT && !S.mkhi_connect ? MKHI_AT : 0u) << 16);
+                r[6] = 2048;
+            }
+        me_msg(0, 0, r, 28);
+        break;
+    case 0x06: { /* connect: the response, and a flow-control grant for the client */
+        uint32_t flow[2] = {0x08u | ((uint32_t)me << 8), 0};
+        r[0] = d[0] | 0x80u;
+        if (S.early_flow)
+            me_msg(0, 0, flow, 8);
+        me_msg(0, 0, r, 4);
+        if (!S.early_flow)
+            me_msg(0, 0, flow, 8);
+        S.connected = true;
+        break;
+    }
+    case 0x07:
+        S.connected = false;
+        r[0] = d[0] | 0x80u;
+        me_msg(0, 0, r, 4);
+        break;
+    case 0x08:
+        S.host_credit = true;
+        break;
+    }
+}
+
+/* The ME reads the host buffer when the host sets IG: one message. */
+static void me_process(void)
+{
+    uint32_t hdr = S.hbuf[0], me = hdr & 0xFF, host = (hdr >> 8) & 0xFF, len = (hdr >> 16) & 0x1FF;
+    bool whole = S.hn == 1 + (len + 3) / 4 && (hdr >> 31);
+    const uint32_t *d = &S.hbuf[1];
+
+    S.hn = 0;
+    if (!whole)
+        return;
+    if (me == 0 && host == 0) {
+        if (!S.hbm_silent)
+            me_hbm(d);
+    } else if (me == MKHI_AT && host == 0) { /* the fixed address */
+        if (len == 4 && d[0] == 0x02FFu && S.reply != REPLY_NONE)
+            me_version(S.reply == REPLY_WRONG_CLIENT ? 0x08 : MKHI_AT, 0);
+    } else if (me == MKHI_AT && S.started && !S.stopped) {
+        if (len == 4 && d[0] == 0x02FFu && (!S.mkhi_connect || (S.connected && S.host_credit))) {
+            S.mkhi_hbm_answered++;
+            me_version(MKHI_AT, (uint8_t)host);
+        }
+    }
 }
 
 static uint32_t mmio_read32(uint64_t a)
@@ -152,6 +246,8 @@ static void check_invariants(const char *name)
     check(S.is_cleared == 0, name, "interrupt status left alone");
 }
 
+static struct csme_clients cl;
+
 static struct boot_csme run(void)
 {
     struct boot_csme c;
@@ -159,7 +255,19 @@ static struct boot_csme run(void)
     S.cmd_initial = (uint16_t)rd32(&S.cfg[4]);
     csme_probe(&ops, &c);
     csme_query_version(&ops, &c);
+    csme_hbm_session(&ops, &c, &cl);
     return c;
+}
+
+/* The HBM session ran to the end and found the three simulated clients. */
+static void check_session(const char *name)
+{
+    check(S.started && S.stopped && !S.connected, name, "HBM started, stopped, nothing left connected");
+    check(cl.count == 3 && cl.hbm_major == 2 && cl.hbm_minor == 2 && cl.c[1].addr == MKHI_AT &&
+              cl.c[1].max_msg_length == 2048, name, "clients enumerated");
+    check(csme_client_name(cl.c[0].uuid) && !strcmp(csme_client_name(cl.c[0].uuid), "AMTHI") &&
+              csme_client_name(cl.c[1].uuid) && !strcmp(csme_client_name(cl.c[1].uuid), "MKHI (fixed)") &&
+              !csme_client_name(cl.c[2].uuid), name, "clients named by UUID");
 }
 
 int main(void)
@@ -183,68 +291,111 @@ int main(void)
     check(c.vendor_id == 0x8086 && c.device_id == 0xA0E0 && c.revision_id == 0x30, "normal", "IDs");
     check(c.hfsts[0] == 0x90000245 && c.hfsts[1] == 0x32280106 && c.hfsts[2] == 0x20, "normal", "raw HFSTS");
     check(c.working_state == 5 && c.op_mode == 0 && c.error_code == 0, "normal", "HFSTS1 decoded");
-    check(c.version_status == BOOT_CSME_VER_OK && (c.flags & BOOT_CSME_VERSION_VALID), "normal", "version read");
+    check(c.version_status == BOOT_CSME_ST_OK && (c.flags & BOOT_CSME_VERSION_VALID), "normal", "version read");
     check(c.fw_major == 16 && c.fw_minor == 1 && c.fw_hotfix == 30 && c.fw_build == 2307, "normal", "version 16.1.30.2307");
-    check(S.mr == S.mw, "normal", "whole reply consumed");
+    check(S.mr == S.mw, "normal", "every reply consumed");
+    check(c.hbm_status == BOOT_CSME_ST_OK && c.client_count == 3, "normal", "HBM session ok");
+    check(c.mkhi_status == BOOT_CSME_ST_OK && S.mkhi_hbm_answered == 1, "normal", "MKHI answered over HBM");
+    check_session("normal");
     check_invariants("normal");
+
+    sim_reset(REPLY_OK);
+    S.mkhi_connect = true;
+    c = run();
+    check(c.mkhi_status == BOOT_CSME_ST_OK && S.host_credit, "connect", "connected, credit given, answered");
+    check_session("connect");
+    check_invariants("connect");
+
+    sim_reset(REPLY_OK);
+    S.mkhi_connect = S.early_flow = true;
+    c = run();
+    check(c.mkhi_status == BOOT_CSME_ST_OK && S.mr == S.mw, "early grant", "grant before response kept");
+    check_session("early grant");
+    check_invariants("early grant");
+
+    sim_reset(REPLY_OK);
+    S.stop_silent = true;
+    c = run();
+    check(c.hbm_status == BOOT_CSME_ST_OK && c.mkhi_status == BOOT_CSME_ST_OK, "silent stop", "session ok");
+    check(S.waited_us >= 20000 && S.waited_us < 25000, "silent stop", "waited 20 ms for the answer, no more");
+    check_session("silent stop");
+    check_invariants("silent stop");
 
     sim_reset(REPLY_OK);
     wr32(&S.cfg[0x04], 0x00100006); /* decoding already on, bus master on */
     c = run();
-    check(c.version_status == BOOT_CSME_VER_OK, "decoding on", "version read");
+    check(c.version_status == BOOT_CSME_ST_OK, "decoding on", "version read");
     check_invariants("decoding on");
 
     sim_reset(REPLY_OK);
     wr32(&S.cfg[0x40], 0x90030245); /* soft temporary disable */
     c = run();
-    check(c.op_mode == 3 && c.version_status == BOOT_CSME_VER_NOT_NORMAL, "disabled", "not asked");
+    check(c.op_mode == 3 && c.version_status == BOOT_CSME_ST_NOT_NORMAL &&
+          c.hbm_status == BOOT_CSME_ST_NOT_NORMAL && c.client_count == 0, "disabled", "not asked");
     check(S.mmio_writes == 0, "disabled", "no MMIO");
     check_invariants("disabled");
 
     sim_reset(REPLY_OK);
     wr32(&S.cfg[0x40], 0x90000045); /* init not complete */
     c = run();
-    check(!(c.flags & BOOT_CSME_INIT_COMPLETE) && c.version_status == BOOT_CSME_VER_NOT_NORMAL,
+    check(!(c.flags & BOOT_CSME_INIT_COMPLETE) && c.version_status == BOOT_CSME_ST_NOT_NORMAL,
           "initializing", "not asked");
 
     sim_reset(REPLY_OK);
     wr32(&S.cfg[0x10], 0x4); /* BAR never assigned */
     c = run();
-    check(c.version_status == BOOT_CSME_VER_NO_BAR && S.mmio_writes == 0, "no BAR", "not asked, no MMIO");
+    check(c.version_status == BOOT_CSME_ST_NO_BAR && c.hbm_status == BOOT_CSME_ST_NO_BAR && S.mmio_writes == 0,
+          "no BAR", "not asked, no MMIO");
     check_invariants("no BAR");
 
     sim_reset(REPLY_OK);
     S.host_csr = 0; /* firmware never brought the host side up */
     c = run();
-    check(c.version_status == BOOT_CSME_VER_NOT_READY && S.mmio_writes == 0, "not ready", "no write, no reset");
+    check(c.version_status == BOOT_CSME_ST_NOT_READY && c.hbm_status == BOOT_CSME_ST_NOT_READY &&
+          S.mmio_writes == 0, "not ready", "no write, no reset");
     check_invariants("not ready");
 
     sim_reset(REPLY_OK);
     me_send(0x12345678); /* a stale message from the ME */
     c = run();
-    check(c.version_status == BOOT_CSME_VER_BUSY && S.mmio_writes == 0, "busy", "no write");
+    check(c.version_status == BOOT_CSME_ST_BUSY && c.hbm_status == BOOT_CSME_ST_BUSY && S.mmio_writes == 0,
+          "busy", "no write");
     check_invariants("busy");
 
+    /* Fixed address closed (after End-of-POST, say): HBM still gets the version. */
     sim_reset(REPLY_NONE);
     c = run();
-    check(c.version_status == BOOT_CSME_VER_TIMEOUT && !(c.flags & BOOT_CSME_VERSION_VALID), "timeout",
-          "reported");
-    check(S.waited_us >= 1000000 && S.waited_us < 1100000, "timeout", "gave up after 1 s");
-    check_invariants("timeout");
+    check(c.version_status == BOOT_CSME_ST_TIMEOUT, "fixed closed", "fixed address timed out");
+    check(S.waited_us >= 1000000 && S.waited_us < 1100000, "fixed closed", "gave up after 1 s");
+    check(c.mkhi_status == BOOT_CSME_ST_OK && (c.flags & BOOT_CSME_VERSION_VALID) && c.fw_major == 16,
+          "fixed closed", "version read over HBM");
+    check_session("fixed closed");
+    check_invariants("fixed closed");
+
+    sim_reset(REPLY_OK);
+    S.hbm_silent = true;
+    c = run();
+    check(c.version_status == BOOT_CSME_ST_OK && c.hbm_status == BOOT_CSME_ST_TIMEOUT && c.client_count == 0 &&
+          c.mkhi_status == BOOT_CSME_ST_NONE, "no HBM", "fixed address ok, session timed out");
+    check(S.waited_us >= 1000000 && S.waited_us < 1100000, "no HBM", "gave up after 1 s");
+    check_invariants("no HBM");
 
     sim_reset(REPLY_REFUSED);
     c = run();
-    check(c.version_status == BOOT_CSME_VER_REFUSED && c.fw_major == 0, "refused", "reported, no version");
+    check(c.version_status == BOOT_CSME_ST_REFUSED && c.mkhi_status == BOOT_CSME_ST_REFUSED && c.fw_major == 0 &&
+          !(c.flags & BOOT_CSME_VERSION_VALID), "refused", "reported on both paths, no version");
+    check_session("refused");
     check_invariants("refused");
 
     sim_reset(REPLY_WRONG_CLIENT);
     c = run();
-    check(c.version_status == BOOT_CSME_VER_BAD_REPLY && c.fw_major == 0, "wrong client", "rejected");
+    check(c.version_status == BOOT_CSME_ST_BAD_REPLY, "wrong client", "rejected");
+    check(c.mkhi_status == BOOT_CSME_ST_OK && c.fw_major == 16, "wrong client", "version read over HBM");
     check_invariants("wrong client");
 
     check(csme_platform_name(0xA0E0) && !strcmp(csme_platform_name(0xA0E0), "Tiger Lake-LP") &&
           !csme_platform_name(0x1234), "names", "platform lookup");
-    check(csme_version_status_name(BOOT_CSME_VER_REFUSED + 1) == NULL && csme_mode_name(15) == NULL &&
+    check(csme_status_name(BOOT_CSME_ST_REFUSED + 1) == NULL && csme_mode_name(15) == NULL &&
           csme_state_name(200) == NULL, "names", "out-of-range values have no name");
 
     printf("%u passed, %u failed\n", g_pass, g_fail);

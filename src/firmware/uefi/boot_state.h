@@ -36,6 +36,7 @@ struct boot_state {
     const struct boot_framebuffer *fb;
     const struct boot_device      *dev;
     const struct boot_csme        *csme;
+    const struct csme_clients     *csme_clients;
 
     /* configuration and the entry being loaded */
     const struct boot_config *cfg;

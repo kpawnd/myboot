@@ -24,7 +24,7 @@ make run                               # boot that ESP in QEMU (window + serial)
 make test                              # one headless boot; passes on exit status 33
 make test-all                          # every scenario in tests/run.sh
 make test-fs                           # filesystem driver on the host (needs Python, 7-Zip)
-make test-csme                         # CSME detection on the host, simulated device
+make test-csme                         # CSME detection and HBM on the host, simulated device
 make iso                               # build/$CONFIG/myboot.iso, hybrid CD/USB image
 make size                              # binary sizes
 ```
@@ -187,12 +187,14 @@ finds in the boot log and in `boot_info.csme`:
 
 ```
 [  OK  ] Detected Intel CSME: Tiger Lake-LP (HECI 8086:A0E0), normal, firmware 15.0.42.2235
+[  OK  ] Talked to Intel CSME over HBM 2.2: 11 clients (MKHI, AMTHI, watchdog, 8 unnamed)
+[  OK  ] Intel CSME MKHI client answered over HBM: firmware 15.0.42.2235
 [ INFO ] Detected Intel CSME: Alder Lake-P (HECI 8086:51E0), normal, mode: soft temporary disable
 [ INFO ] No Intel CSME visible (HECI hidden or absent)
-[ WARN ] Intel CSME firmware version unavailable: no reply within 1 s
+[ WARN ] Intel CSME did not answer at MKHI's fixed address: no reply within 1 s
 ```
 
-It works in two steps:
+It works in three steps:
 
 1. **Status, read-only.** The loader reads configuration space through ECAM
    (from the ACPI `MCFG` table), or through ports `0xCF8`/`0xCFC` when there is
@@ -200,20 +202,35 @@ It works in two steps:
    firmware status registers HFSTS1-6. From HFSTS1 the loader decodes the
    working state, operating mode, error code and whether init is complete.
    `boot_info.csme.hfsts[]` holds all six raw registers.
-2. **Firmware version, one message.** If the CSME is in normal state and
-   normal mode, the loader sends one MKHI `GET_FW_VERSION` request over HECI
-   and reads the reply. This is the only step that writes to the device, and
-   it has limits:
-   - It uses only a memory BAR the firmware already assigned.
-   - It uses the link only if the firmware left both sides ready and both
-     buffers empty. It never resets the link.
-   - If memory decoding was off, it turns it on for the exchange and then
-     restores the Command register.
+2. **Firmware version at MKHI's fixed address.** The loader sends one MKHI
+   `GET_FW_VERSION` request to address 7, the way firmware does, and reads
+   the reply.
+3. **An HBM session.** The loader speaks the HECI bus protocol, as Linux's
+   `mei` driver does: `HOST_START`, enumerate the ME clients, read each
+   one's properties (UUID, protocol, message size), then ask the MKHI client
+   for the firmware version through it. A fixed-address client is used
+   directly; any other is connected to with flow control and disconnected
+   afterwards. The session ends with `HOST_STOP`, whose answer is optional (Arrow
+   Lake sends none). Known client UUIDs are
+   named (MKHI, AMTHI, watchdog, HDCP, PAVP, NFC, DAL). The debug build logs
+   every client on its own line.
 
-   Any failure, including no reply within 1 s, leaves the version unknown.
-   The log line says why, and booting continues. To drop this step and keep
-   only the read-only status, run `make clean` and then
-   `make CSME_QUERY=0`.
+Steps 2 and 3 run only if the CSME is in normal state and normal mode, and
+they have limits:
+
+- They use only a memory BAR the firmware already assigned.
+- They use the link only if the firmware left both sides ready and both
+  buffers empty. They never reset the link.
+- If memory decoding was off, they turn it on for the exchange and then
+  restore the Command register.
+- They run at `TPL_HIGH_LEVEL`, so no firmware timer event can use HECI in
+  the middle. A CSME that does not answer holds that for up to 1 s per step.
+
+`boot_info.csme` records how each went (`version_status`, `hbm_status`,
+`mkhi_status`) and how many clients the session found (`client_count`).
+Any failure leaves that part unknown. The log line says why, and booting
+continues. To drop steps 2 and 3 and keep only the read-only status, run
+`make clean` and then `make CSME_QUERY=0`.
 
 Limits:
 
@@ -221,8 +238,12 @@ Limits:
   HECI1 (a common BIOS option), or the platform has none. The loader cannot
   tell these apart.
 - Some firmware closes the MKHI fixed-address client after End-of-POST. On
-  those machines the version query fails with "request refused" or a
-  timeout, and the status from step 1 is still reported.
+  those machines step 2 fails with "request refused" or a timeout, and the
+  version comes from step 3 instead.
+- If the firmware itself already started an HBM session and left it open,
+  the CSME may reject the second `HOST_START` or reset the link. The loader
+  reports that and does not retry. Linux resets the link when it loads
+  `mei_me`, so the kernel is unaffected either way.
 - HFSTS1 bit 4 means manufacturing mode on older CSMEs and SPI protection
   on newer ones, so the loader does not decode it. The raw value is in
   `hfsts[0]`.

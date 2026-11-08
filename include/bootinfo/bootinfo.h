@@ -211,19 +211,20 @@ struct boot_device {
  * firmware. The loader cannot tell those apart. */
 #define BOOT_CSME_PRESENT       (1u << 0) /* vendor_id, device_id, hfsts[] are valid */
 #define BOOT_CSME_INIT_COMPLETE (1u << 1) /* HFSTS1 bit 9 */
-#define BOOT_CSME_VERSION_VALID (1u << 2) /* fw_* are valid */
+#define BOOT_CSME_VERSION_VALID (1u << 2) /* fw_*: from whichever query answered first */
 
-/* boot_csme.version_status: how the firmware version query went */
-enum boot_csme_version {
-    BOOT_CSME_VER_NONE = 0,       /* not attempted: no CSME, or built without the query */
-    BOOT_CSME_VER_OK = 1,
-    BOOT_CSME_VER_NOT_NORMAL = 2, /* CSME not in normal state and mode: not asked */
-    BOOT_CSME_VER_NO_BAR = 3,     /* firmware assigned HECI no memory BAR */
-    BOOT_CSME_VER_NOT_READY = 4,  /* HECI link not ready on both sides */
-    BOOT_CSME_VER_BUSY = 5,       /* HECI buffers not empty: another message in flight */
-    BOOT_CSME_VER_TIMEOUT = 6,    /* no reply within 1 s */
-    BOOT_CSME_VER_BAD_REPLY = 7,  /* reply malformed or for another request */
-    BOOT_CSME_VER_REFUSED = 8     /* MKHI result code not 0 */
+/* boot_csme.version_status, hbm_status, mkhi_status: how each exchange with
+ * the CSME went */
+enum boot_csme_status {
+    BOOT_CSME_ST_NONE = 0,       /* not attempted: no CSME, or built without the query */
+    BOOT_CSME_ST_OK = 1,
+    BOOT_CSME_ST_NOT_NORMAL = 2, /* CSME not in normal state and mode: not asked */
+    BOOT_CSME_ST_NO_BAR = 3,     /* firmware assigned HECI no memory BAR */
+    BOOT_CSME_ST_NOT_READY = 4,  /* HECI link not ready on both sides */
+    BOOT_CSME_ST_BUSY = 5,       /* HECI buffers not empty: another message in flight */
+    BOOT_CSME_ST_TIMEOUT = 6,    /* no reply within 1 s */
+    BOOT_CSME_ST_BAD_REPLY = 7,  /* reply malformed or for another request */
+    BOOT_CSME_ST_REFUSED = 8     /* result or status code not 0 */
 };
 
 struct boot_csme {
@@ -239,8 +240,10 @@ struct boot_csme {
     uint8_t  working_state;  /* HFSTS1[3:0]: 5 = normal */
     uint8_t  op_mode;        /* HFSTS1[19:16]: 0 = normal */
     uint8_t  error_code;     /* HFSTS1[15:12]: 0 = none */
-    uint8_t  version_status; /* enum boot_csme_version */
-    uint8_t  reserved[3];
+    uint8_t  version_status; /* enum boot_csme_status: MKHI at its fixed address */
+    uint8_t  hbm_status;     /* enum boot_csme_status: the HBM session */
+    uint8_t  mkhi_status;    /* enum boot_csme_status: MKHI through HBM; NONE if no such client */
+    uint8_t  client_count;   /* ME clients the HBM session enumerated (saturates at 255) */
 };
 
 /* A file loaded for the kernel ("module" line in BOOT.CFG): an initrd, a
