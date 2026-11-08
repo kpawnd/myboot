@@ -14,6 +14,10 @@
 #include "core/util.h"
 
 void con_init(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out);
+/* Switch to the text mode with the most cells, as systemd-boot's
+ * "console-mode max" does; most firmware then drives the display at its
+ * native resolution instead of stretching 800x600. Clears the screen. */
+void con_max_mode(void);
 void con_puts(const CHAR16 *s);
 
 /* Everything printed is also kept as ASCII for the kernel, except while

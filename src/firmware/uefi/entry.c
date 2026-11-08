@@ -599,6 +599,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     g_uefi.st = st;
     g_uefi.bs = st->BootServices;
     con_init(st->ConOut);
+    con_max_mode();
     PROF_SET(PROF_ENTRY, tsc_entry);
 
     s = g_uefi.bs->HandleProtocol(image, &g_guid_loaded_image, (void **)&g_uefi.li);

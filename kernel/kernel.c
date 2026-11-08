@@ -66,6 +66,7 @@ static void serial_putc(char c)
 
 #define CELL_W   8
 #define CELL_H   10 /* 8-pixel glyph + 2 pixels of leading */
+#define MIN_ROWS 60 /* glyphs are scaled up by whole pixels while this many rows fit */
 #define CON_COLS 256
 #define CON_ROWS 128
 
@@ -74,16 +75,23 @@ enum { COL_TEXT, COL_OK, COL_FAIL, COL_WARN, COL_COUNT };
 static uint8_t con_chars[CON_ROWS][CON_COLS];
 static uint8_t con_color[CON_ROWS][CON_COLS];
 static uint32_t con_cols, con_rows, con_x, con_y;
+static uint32_t con_scale = 1; /* each font pixel is con_scale x con_scale */
 static uint8_t con_cur = COL_TEXT;
 
 static void con_init(const struct boot_info *bi)
 {
     const struct boot_framebuffer *fb = &bi->framebuffer;
 
+    uint32_t cw, ch;
+
     if (!fb->base || fb->bpp != 32)
         return;
-    con_cols = fb->width / CELL_W < CON_COLS ? fb->width / CELL_W : CON_COLS;
-    con_rows = fb->height / CELL_H < CON_ROWS ? fb->height / CELL_H : CON_ROWS;
+    /* An 8x8 font is unreadable on a high-resolution panel at 1:1. */
+    con_scale = fb->height / (CELL_H * MIN_ROWS) ? fb->height / (CELL_H * MIN_ROWS) : 1;
+    cw = CELL_W * con_scale;
+    ch = CELL_H * con_scale;
+    con_cols = fb->width / cw < CON_COLS ? fb->width / cw : CON_COLS;
+    con_rows = fb->height / ch < CON_ROWS ? fb->height / ch : CON_ROWS;
 }
 
 static void con_newline(void)
@@ -141,17 +149,17 @@ static void con_flush(const struct boot_info *bi)
     fg[COL_WARN] = rgb(fb, 0xFF, 0xD0, 0x40);
     for (uint32_t y = 0; y < fb->height; y++) {
         volatile uint32_t *px = (volatile uint32_t *)(base + (uint64_t)y * fb->pitch);
-        uint32_t row = y / CELL_H, gy = y % CELL_H;
+        uint32_t fy = y / con_scale, row = fy / CELL_H, gy = fy % CELL_H;
 
         for (uint32_t x = 0; x < fb->width; x++) {
-            uint32_t col = x / CELL_W;
+            uint32_t fx = x / con_scale, col = fx / CELL_W;
             uint8_t ch = 0, bits = 0;
 
             if (row < con_rows && col < con_cols)
                 ch = con_chars[row][col];
             if (ch >= 0x20 && ch < 0x7F && gy < 8)
                 bits = font8x8_basic[ch][gy];
-            px[x] = (bits >> (x % CELL_W)) & 1 ? fg[con_color[row][col]] : bg;
+            px[x] = (bits >> (fx % CELL_W)) & 1 ? fg[con_color[row][col]] : bg;
         }
     }
 }

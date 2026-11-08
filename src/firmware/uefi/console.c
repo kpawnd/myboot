@@ -16,6 +16,27 @@ void con_init(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out)
     g_con = out;
 }
 
+void con_max_mode(void)
+{
+    UINTN best = 0, best_cells = 0;
+
+    if (!g_con->Mode || !g_con->SetMode)
+        return;
+    for (UINTN m = 0; m < (UINTN)g_con->Mode->MaxMode; m++) {
+        UINTN c, r;
+
+        /* Mode 1 (80x50) may be listed but unsupported: QueryMode fails. */
+        if (EFI_ERROR(g_con->QueryMode(g_con, m, &c, &r)) || c > 1000 || r > 1000)
+            continue;
+        if (c * r > best_cells) {
+            best_cells = c * r;
+            best = m;
+        }
+    }
+    if (best_cells && best != (UINTN)g_con->Mode->Mode)
+        g_con->SetMode(g_con, best); /* clears the screen; on failure the mode stays */
+}
+
 static void log_append(const CHAR16 *s)
 {
     static const char cut[] = "[log truncated]\n";

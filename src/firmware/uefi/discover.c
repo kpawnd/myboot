@@ -161,7 +161,9 @@ const struct smbios_info *discover_smbios(void)
     return &g_smbios;
 }
 
-/* ---- graphics: current GOP mode only, never SetMode ------------------- */
+/* ---- graphics: the current GOP mode, never SetMode -------------------
+ * Startup's con_max_mode may already have changed it through the text
+ * console; this reads whatever the firmware ended up with. */
 
 static struct boot_framebuffer g_fb;
 static bool g_fb_done;
