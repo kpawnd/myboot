@@ -13,6 +13,7 @@
 #include "smbios/smbios.h"
 #include "config/config.h"
 #include "fs/ext4.h"
+#include "arch/x86_64/smp.h"
 
 struct uefi_ctx {
     EFI_HANDLE                 image;
@@ -70,6 +71,14 @@ const struct boot_framebuffer *discover_graphics(void); /* base == 0 if absent *
 const struct boot_device      *discover_storage(void);
 const struct boot_csme        *discover_csme(void);   /* vendor_id == 0 if none */
 const struct csme_clients     *discover_csme_clients(void);
+
+/* CPUs from the ACPI MADT, the BSP first. total == 0 without a MADT;
+ * cpu[] holds min(total, SMP_MAX_CPUS). */
+struct smp_cpus {
+    uint32_t                   total, count;
+    const struct smp_madt_cpu *cpu;
+};
+const struct smp_cpus         *discover_smp(void);
 bool uefi_phys_range_ok(uint64_t addr, uint64_t len);
 
 /* Volumes (volume.c): partitions and whole disks holding a filesystem the

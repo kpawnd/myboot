@@ -37,6 +37,7 @@ struct boot_state {
     const struct boot_device      *dev;
     const struct boot_csme        *csme;
     const struct csme_clients     *csme_clients;
+    const struct smp_cpus         *smp;
 
     /* configuration and the entry being loaded */
     const struct boot_config *cfg;
@@ -75,6 +76,15 @@ struct boot_state {
     char                  *log; /* CON_LOG_MAX bytes, filled just before exit */
     uint64_t               gdtr_virt;
     uint64_t               stack_top_virt;
+
+    /* CPU state set up after ExitBootServices, the same on every CPU */
+    uint64_t cr0, cr4, xcr0;
+    /* APs: the trampoline page below 1 MiB, and their entries in the arena */
+    uint64_t             tramp_page; /* 0: no AP startup */
+    bool                 nosmp;      /* "nosmp" in the command line */
+    uint16_t             smpstop;    /* "smpstop=N": APs halt at trampoline stage N */
+    struct boot_smp_cpu *smp_cpus;
+    uint32_t             smp_count;
 
     uint32_t ebs_attempts;
 };

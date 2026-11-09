@@ -101,6 +101,9 @@ SRCS := src/firmware/uefi/entry.c \
         src/elf/elf.c \
         src/arch/x86_64/paging.c \
         src/arch/x86_64/handoff.S \
+        src/arch/x86_64/smp.c \
+        src/arch/x86_64/smp_tramp.S \
+        src/arch/x86_64/exc.S \
         src/lib/mem.c
 OBJS := $(patsubst %,$(BUILD)/obj/%.obj,$(basename $(SRCS)))
 
@@ -187,6 +190,8 @@ size:
 QEMU       ?= qemu-system-x86_64
 QEMU_SHARE ?= C:/Program Files/qemu/share
 QEMU_MEM   ?= 256M
+# CPUs: the test kernel releases every AP the loader parked and checks it arrives
+QEMU_SMP   ?= 4
 VARS       := build/vars.fd
 
 # -net none : skip OVMF's PXE attempts (saves seconds per test boot).
@@ -195,7 +200,7 @@ VARS       := build/vars.fd
 #             default q35 AHCI disk fails with "Block node is read-only".
 # -serial stdio : OVMF mirrors ConOut to COM1, and the kernel writes COM1.
 # isa-debug-exit : lets the test kernel end QEMU with a status code.
-QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -net none -no-reboot \
+QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -smp $(QEMU_SMP) -net none -no-reboot \
             -drive "if=pflash,format=raw,readonly=on,file=$(QEMU_SHARE)/edk2-x86_64-code.fd" \
             -drive if=pflash,format=raw,file=$(VARS) \
             -drive if=virtio,readonly=on,format=raw,file=fat:$(ESP) \
@@ -245,7 +250,7 @@ LINUX_KERNEL ?= C:/Program Files/WSL/tools/kernel
 LINUX_INITRD ?= C:/Program Files/WSL/tools/initrd.img
 
 test-all: all $(CHAINTEST)
-	@CONFIG=$(CONFIG) QEMU="$(QEMU)" QEMU_SHARE="$(QEMU_SHARE)" QEMU_MEM=$(QEMU_MEM) \
+	@CONFIG=$(CONFIG) QEMU="$(QEMU)" QEMU_SHARE="$(QEMU_SHARE)" QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) \
 	  CHAINTEST="$(CHAINTEST)" LINUX_KERNEL="$(LINUX_KERNEL)" LINUX_INITRD="$(LINUX_INITRD)" \
 	  sh tests/run.sh
 

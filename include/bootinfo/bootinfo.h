@@ -1,5 +1,5 @@
 /*
- * MYBOOT boot protocol, version 1: the contract between loader and kernel.
+ * MYBOOT boot protocol, version 3: the contract between loader and kernel.
  *
  * This header is shared by the loader and the kernel and is the only
  * definition of the ABI. Every field has an explicit width and a fixed
@@ -25,11 +25,17 @@
  *   before enabling interrupts).
  *   CR0.PG, CR0.WP and CR4.PAE set; EFER.NXE set iff BOOT_F_NX.
  *   CR4.LA57 is left as firmware set it; BOOT_F_LA57 says which.
+ *   IA32_PAT = boot_info.pat, Linux's layout: entry 0 WB, 1 WC, 2 UC-,
+ *   3 UC, 4 WB, 5 WP, 6 UC-, 7 WT. PWT alone in a PTE selects WC.
  *   GDT: 0x08 = 64-bit code, 0x10 = data; CS = 0x08, DS/ES/SS/FS/GS = 0x10.
  *   RDI = virtual address of struct boot_info (inside the HHDM).
  *   RSP = top of a 64 KiB stack minus 8 (aligned as just after a CALL);
  *   [RSP] = 0 as a fake return address. RBP = 0.
- *   SSE/x87 state: untouched, initialise it yourself.
+ *   SSE enabled: CR0.EM clear, CR0.MP and CR0.NE set, CR4.OSFXSR and
+ *   CR4.OSXMMEXCPT set. With XSAVE, CR4.OSXSAVE set and XCR0 =
+ *   boot_info.xcr0 (x87, SSE, and AVX and AVX-512 where the CPU has them);
+ *   xsave_size is the XSAVE area those need. Register contents are
+ *   undefined: FNINIT and clear what you use.
  *
  * Address space at kernel entry
  *   Kernel PT_LOAD segments at their p_vaddr with 4 KiB pages:
@@ -44,10 +50,26 @@
  *     Cacheability comes from the firmware's MTRRs.
  *   Framebuffer (if present): mapped read/write, non-executable, at
  *     hhdm_base + framebuffer.base, even when above hhdm_size. The part
- *     beyond hhdm_size is uncached-minus (PCD set; UC, or WC if a firmware
- *     MTRR says so). Remap it write-combining for speed.
+ *     beyond hhdm_size is write-combining (PWT set: PAT entry 1), and
+ *     BOOT_F_FB_WC says the whole framebuffer is. Inside the HHDM it keeps
+ *     the HHDM's attributes, which the firmware's MTRRs usually make UC.
  *   One identity-mapped executable 8 KiB window holding the loader's
- *   handoff code. Nothing else. The kernel should build its own tables.
+ *   handoff code, and, with application processors parked, the 4 KiB
+ *   AP trampoline page (read-only, executable) they spin in. Nothing else.
+ *   The kernel should build its own tables, keeping the trampoline page
+ *   mapped until every parked AP has been released.
+ *
+ * Application processors (SMP)
+ *   smp_cpus lists every enabled CPU of the ACPI MADT, the BSP first.
+ *   Each AP the loader could start is BOOT_SMP_PARKED: in 64-bit mode on
+ *   the kernel's page tables, with the same CR0, EFER, PAT and XCR0 as the
+ *   BSP and CR4 = PAE, OSFXSR, OSXMMEXCPT, plus OSXSAVE and LA57 when the
+ *   BSP has them; interrupts off; GDT as below; RSP = stack_top. It spins
+ *   on goto_address. Write a kernel virtual address there (after anything
+ *   in extra_argument) and the AP jumps to it with RDI = the virtual (HHDM)
+ *   address of its boot_smp_cpu and [RSP] = 0 as a fake return address.
+ *   The 16 KiB AP stacks are BOOTLOADER_RECLAIMABLE: switch away from them
+ *   before reclaiming.
  *
  * Pointers inside boot_info are PHYSICAL addresses (0 = absent); add
  * hhdm_base to dereference them. All referenced memory lies in entries of
@@ -70,7 +92,7 @@
 #include <stdint.h>
 
 #define BOOT_INFO_MAGIC   0x4942544F4F42594DULL /* "MYBOOTBI" little-endian */
-#define BOOT_INFO_VERSION 2u /* 2: boot_info.csme */
+#define BOOT_INFO_VERSION 3u /* 2: boot_info.csme; 3: PAT, XCR0, SMP */
 
 #define BOOT_HHDM_BASE    0xFFFF800000000000ULL
 #define BOOT_KERNEL_VMIN  0xFFFFFFFF80000000ULL
@@ -80,6 +102,7 @@
 #define BOOT_F_LA57    (1u << 1) /* 5-level paging active; CR3 is a PML5 */
 #define BOOT_F_NX      (1u << 2) /* EFER.NXE set; NX bits in use */
 #define BOOT_F_HHDM_1G (1u << 3) /* HHDM built from 1 GiB pages */
+#define BOOT_F_FB_WC   (1u << 4) /* the whole framebuffer is mapped write-combining */
 
 /* boot_mem_entry.type. Entries are sorted by base, non-overlapping, 4 KiB
  * aligned, and adjacent entries of equal type and flags are merged. */
@@ -246,6 +269,29 @@ struct boot_csme {
     uint8_t  client_count;   /* ME clients the HBM session enumerated (saturates at 255) */
 };
 
+/* boot_smp_cpu.state */
+enum boot_smp_state {
+    BOOT_SMP_OFF = 0,    /* not started: no answer, or not addressable (xAPIC, ID > 254) */
+    BOOT_SMP_BSP = 1,    /* the CPU running the kernel */
+    BOOT_SMP_PARKED = 2  /* waiting on goto_address */
+};
+
+/* boot_info.smp_flags */
+#define BOOT_SMP_F_X2APIC (1u << 0) /* APs were started through x2APIC MSRs */
+
+/* One CPU of the MADT. The loader never writes an entry after handoff;
+ * a parked AP only reads goto_address. */
+struct boot_smp_cpu {
+    uint32_t apic_id;        /* x2APIC ID (xAPIC ID for xAPIC-only entries) */
+    uint32_t acpi_uid;       /* ACPI processor UID from the MADT */
+    uint32_t state;          /* enum boot_smp_state */
+    uint32_t reserved;
+    uint64_t stack_top;      /* virtual (HHDM), 16-byte aligned; 0 for the BSP */
+    uint64_t goto_address;   /* kernel writes a virtual address to release the AP */
+    uint64_t extra_argument; /* free for the kernel to pass something */
+    uint64_t reserved2[3];
+};
+
 /* A file loaded for the kernel ("module" line in BOOT.CFG): an initrd, a
  * driver, a font. Each module has its own page-aligned allocation; the
  * bytes after `size` up to the page end are zero. */
@@ -304,6 +350,13 @@ struct boot_info {
     uint32_t loader_log_size;     /* bytes: ASCII, '\n' line ends, not NUL-terminated */
     uint32_t reserved2;
     struct boot_csme        csme; /* Intel CSME; zero when none was visible */
+    uint64_t pat;                 /* IA32_PAT on every CPU at entry */
+    uint64_t xcr0;                /* XCR0 on every CPU; 0 when XSAVE is off */
+    uint32_t xsave_size;          /* bytes for an XSAVE area of xcr0; 0 without XSAVE */
+    uint32_t smp_count;           /* entries in smp_cpus, BSP included; 0 = no MADT */
+    uint64_t smp_cpus;            /* phys of struct boot_smp_cpu[smp_count], 0 if none */
+    uint32_t smp_parked;          /* entries in state BOOT_SMP_PARKED */
+    uint32_t smp_flags;           /* BOOT_SMP_F_* */
 };
 
 /* ABI verification. A change here is a protocol version change. */
@@ -331,6 +384,11 @@ _Static_assert(offsetof(struct boot_info, loader_log) == 528, "boot_info.loader_
 _Static_assert(sizeof(struct boot_csme) == 48, "boot_csme");
 _Static_assert(offsetof(struct boot_csme, fw_major) == 32, "boot_csme.fw_major");
 _Static_assert(offsetof(struct boot_info, csme) == 544, "boot_info.csme");
-_Static_assert(sizeof(struct boot_info) == 592, "boot_info");
+_Static_assert(sizeof(struct boot_smp_cpu) == 64, "boot_smp_cpu");
+_Static_assert(offsetof(struct boot_smp_cpu, stack_top) == 16, "boot_smp_cpu.stack_top");
+_Static_assert(offsetof(struct boot_smp_cpu, goto_address) == 24, "boot_smp_cpu.goto_address");
+_Static_assert(offsetof(struct boot_info, pat) == 592, "boot_info.pat");
+_Static_assert(offsetof(struct boot_info, smp_cpus) == 616, "boot_info.smp_cpus");
+_Static_assert(sizeof(struct boot_info) == 632, "boot_info");
 
 #endif

@@ -16,10 +16,9 @@
 /* Protection requested for a mapping; read access is implied. */
 #define PT_W  (1u << 0)
 #define PT_X  (1u << 1)
-/* Uncached-minus: sets PCD, which selects PAT entry 2 (UC-) in the
- * power-on PAT. With the firmware's MTRRs this yields UC for MMIO, or WC
- * where firmware set a WC MTRR. Used for the framebuffer. */
-#define PT_UC (1u << 2)
+/* Write-combining: sets PWT alone, PAT entry 1, which PAT_LINUX makes WC
+ * (in the power-on PAT it is WT). Used for the framebuffer. */
+#define PT_WC (1u << 2)
 
 struct pt_builder {
     uint64_t *root;  /* PML5 when la57, else PML4: what CR3 points to */

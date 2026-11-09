@@ -162,7 +162,7 @@ const struct smbios_info *discover_smbios(void)
 }
 
 /* ---- graphics: the current GOP mode, never SetMode -------------------
- * Startup's con_max_mode may already have changed it through the text
+ * Startup's con_pick_mode may already have changed it through the text
  * console; this reads whatever the firmware ended up with. */
 
 static struct boot_framebuffer g_fb;
@@ -395,4 +395,28 @@ const struct boot_csme *discover_csme(void)
 const struct csme_clients *discover_csme_clients(void)
 {
     return &g_csme_clients;
+}
+
+/* ---- CPUs: the ACPI MADT -------------------------------------------------- */
+
+static struct smp_madt_cpu g_smp_cpu[SMP_MAX_CPUS];
+static struct smp_cpus g_smp = {0, 0, g_smp_cpu};
+static bool g_smp_done;
+
+const struct smp_cpus *discover_smp(void)
+{
+    const struct acpi_info *a;
+    uint32_t len;
+    uint64_t madt;
+
+    if (g_smp_done)
+        return &g_smp;
+    g_smp_done = true;
+    a = discover_acpi();
+    if (!a->rsdp || !(madt = acpi_find_table(a, "APIC", uefi_phys_range_ok, &len)))
+        return &g_smp;
+    g_smp.total = smp_parse_madt((const uint8_t *)(uintptr_t)madt, len, discover_cpu()->bsp_apic_id, g_smp_cpu,
+                                 SMP_MAX_CPUS);
+    g_smp.count = g_smp.total < SMP_MAX_CPUS ? g_smp.total : SMP_MAX_CPUS;
+    return &g_smp;
 }

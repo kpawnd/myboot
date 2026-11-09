@@ -316,3 +316,39 @@ In short:
 - ELF64 `ET_EXEC`, linked in the top 2 GiB (`-mcmodel=kernel`), at most 1 GiB.
 - Entry in long mode with interrupts off, no IDT, and `RDI` = `struct boot_info *`.
 - All physical memory is reachable at `hhdm_base + phys`.
+- SSE is on, and with XSAVE so are AVX and AVX-512 where the CPU has them:
+  `xcr0` and `xsave_size` say what to save on a context switch.
+- PAT is Linux's layout (entry 1 is write-combining), and the framebuffer is
+  mapped write-combining when it lies above the direct map (`BOOT_F_FB_WC`).
+- Every other CPU in the ACPI MADT is already started and parked in 64-bit
+  mode on the kernel's page tables. `smp_cpus` lists them. To release one,
+  write a function address to its `goto_address`: it jumps there with its
+  own 16 KiB stack and `RDI` = its entry, as in the test kernel's `check_smp`.
+
+### How the loader starts the other CPUs
+
+After `ExitBootServices` the firmware no longer owns the APs, so the loader
+starts them itself, as Limine does. Before exiting it reads the MADT,
+reserves a 16 KiB stack per AP, and copies a small trampoline
+([`src/arch/x86_64/smp_tramp.S`](src/arch/x86_64/smp_tramp.S)) to a page
+below 1 MiB. After exiting it follows the SDM's own sequence: an INIT to
+"all processors excluding self", a wait, then two start-up IPIs (SIPIs) the
+same way, pointing at that page. The wait is the SDM's 10 ms only on old
+CPUs; like Linux, the loader waits 10 us on Intel Core 2 and later and AMD
+family 10h and later. No IPI names a destination, so none can
+reach the boot CPU, and there is no INIT de-assert (on real hardware it can
+reach every processor, the boot CPU included). Each AP then goes from real
+mode through protected mode to long mode on the kernel's page tables, loads
+the same PAT and XCR0 as the boot CPU, finds its own entry by APIC ID, and
+spins on `goto_address`. All APs run the trampoline at once, and the loader
+waits at most 100 ms for them to park. A CPU that does not answer is left
+`BOOT_SMP_OFF`. `make test` runs QEMU with 4 CPUs (`QEMU_SMP`).
+
+When AP startup hangs on real hardware, debug builds help find where:
+green squares in the top-left corner mark each step after
+`ExitBootServices`, then come a row per CPU and three rows counting the
+APs that reached the trampoline's 16-, 32- and 64-bit code. An exception
+on the boot CPU (an NMI, a machine check) shows as a row of red squares,
+one more than the vector number. `smpstop=N` on the command line halts
+every AP at stage N (1: 16-bit, 2: 32-bit, 3: 64-bit, 4: before parking)
+and keeps the squares up for 5 seconds.

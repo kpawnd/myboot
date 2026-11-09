@@ -385,6 +385,39 @@ void report_discovery(const struct boot_state *s)
         blog_str("No framebuffer: the kernel gets no screen");
         blog_end(TAG_WARN);
     }
+    if (s->smp->total) {
+        blog_str("Found ");
+        blog_dec(s->smp->total);
+        blog_str(s->smp->total == 1 ? " CPU" : " CPUs");
+        blog_str(" in the ACPI MADT");
+        if (s->smp->total > s->smp->count) {
+            blog_str(", using the first ");
+            blog_dec(s->smp->count);
+        }
+        blog_end(TAG_OK);
+    } else {
+        blog_str("No ACPI MADT: the kernel gets the boot CPU only");
+        blog_end(TAG_INFO);
+    }
+#if BOOT_DEBUG
+    {
+        const struct con_mode *m;
+        uint32_t cur, n = con_modes(&m, &cur);
+
+        blog_str("Text modes:");
+        for (uint32_t i = 0; i < n; i++) {
+            blog_str(m[i].number == cur ? " [" : " ");
+            blog_dec(m[i].number);
+            blog_str("=");
+            blog_dec(m[i].cols);
+            blog_str("x");
+            blog_dec(m[i].rows);
+            if (m[i].number == cur)
+                blog_str("]");
+        }
+        blog_end(TAG_INFO);
+    }
+#endif
 
     blog_str("Found boot device: ");
     blog_str(interface_name(dev->interface));
@@ -430,6 +463,30 @@ void report_handoff(const struct boot_state *s)
     blog_dec(s->nmod);
     blog_str(s->nmod == 1 ? " module" : " modules");
     blog_end(TAG_OK);
+
+    /* What the CPUs will run with; set after ExitBootServices. */
+    blog_str("Prepared CPU state: SSE");
+    if (s->xcr0 & XCR0_AVX)
+        blog_str(", AVX");
+    if (s->xcr0 & XCR0_AVX512)
+        blog_str(", AVX-512");
+    blog_str(", write-combining framebuffer");
+    blog_end(TAG_OK);
+    if (s->tramp_page) {
+        blog_str("Prepared startup of ");
+        blog_dec(s->smp_count - 1);
+        blog_str(s->smp_count == 2 ? " application processor" : " application processors");
+        blog_str(" (trampoline at ");
+        blog_hex(s->tramp_page);
+        blog_str(")");
+        blog_end(TAG_OK);
+    } else if (s->smp_count > 1 && s->nosmp) {
+        blog_str("Not starting application processors: nosmp");
+        blog_end(TAG_INFO);
+    } else if (s->smp_count > 1) {
+        blog_str("Not starting application processors: no page below 1 MiB or tables above 4 GiB");
+        blog_end(TAG_WARN);
+    }
 
 #if BOOT_DEBUG && BOOT_PROFILE
     {

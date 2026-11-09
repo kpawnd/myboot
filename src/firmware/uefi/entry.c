@@ -38,6 +38,15 @@
 #define HHDM_MAX         (1ull << 46)    /* 64 TiB: keeps the HHDM clear of the kernel's PML4 slot */
 #define LOW_HALF_END     (1ull << 47)
 
+/* Progress squares after ExitBootServices (see stage()) */
+enum {
+    STAGE_EXITED = 1, /* firmware gone, memory map final */
+    STAGE_CPU_STATE,  /* CR0, CR4, XCR0 */
+    STAGE_PAT,
+    STAGE_SMP,        /* + SMP_STAGE_*: APIC read, INIT sent, 10 ms passed, SIPI, SIPI */
+    STAGE_HANDOFF = STAGE_SMP + SMP_STAGE_SIPI2 + 1 /* APs settled, jumping to the kernel */
+};
+
 struct uefi_ctx g_uefi;
 #if BOOT_PROFILE
 uint64_t g_prof[PROF_COUNT];
@@ -97,9 +106,12 @@ static void release_resources(void)
     release_entry();
     if (S.arena_pages)
         g_uefi.bs->FreePages(S.arena.base, S.arena_pages);
+    if (S.tramp_page)
+        g_uefi.bs->FreePages(S.tramp_page, 1);
     if (S.mem)
         uefi_mmap_free(&S.mem->map);
     S.arena_pages = 0;
+    S.tramp_page = 0;
 }
 
 /* Every fatal failure before ExitBootServices ends here: all our memory
@@ -113,16 +125,15 @@ static EFI_STATUS fail(const CHAR16 *what, const char *detail, EFI_STATUS status
     return status;
 }
 
-#if BOOT_PROFILE
 /* Only reached when CPUID gives no TSC frequency (AMD, most VMs). Costs
- * TSC_CAL_US of wall time, so release builds skip it and report 0. */
+ * TSC_CAL_US of wall time: profiling builds pay it at startup, the rest
+ * only when AP startup needs a clock after ExitBootServices. */
 static void calibrate_tsc(void)
 {
     uint64_t t0 = rdtsc();
     g_uefi.bs->Stall(TSC_CAL_US);
     cpu_set_tsc_hz((rdtsc() - t0) * (1000000 / TSC_CAL_US), BOOT_TSC_CALIBRATED);
 }
-#endif
 
 /* LoadOptions become the kernel command line only if they are plain
  * printable ASCII in UTF-16: boot managers often pass binary data there. */
@@ -459,6 +470,12 @@ static void fill_boot_info(struct boot_info *bi, const char *cmdline, uint64_t t
     bi->framebuffer = *S.fb;
     bi->boot_device = *S.dev;
     bi->csme = *S.csme;
+    bi->pat = PAT_LINUX;
+    bi->xcr0 = S.xcr0;
+    bi->smp_count = S.smp_count;
+    bi->smp_cpus = S.smp_count ? (uintptr_t)S.smp_cpus : 0;
+    if (S.fb->base && S.fb->base >= S.hhdm_size)
+        bi->flags |= BOOT_F_FB_WC;
 
     memset(S.bmods, 0, (uint64_t)S.nmod * sizeof(struct boot_module));
     for (uint32_t i = 0; i < S.nmod; i++) {
@@ -476,10 +493,228 @@ static void fill_boot_info(struct boot_info *bi, const char *cmdline, uint64_t t
     }
 }
 
+/* `word` as a whole space-separated word of the kernel command line. */
+static bool cmdline_has(const char *word)
+{
+    size_t n = 0;
+
+    while (word[n])
+        n++;
+
+    for (uint32_t i = 0; i + n <= S.cmdline_len; i++)
+        if ((i == 0 || S.cmdline[i - 1] == ' ') && !memcmp(S.cmdline + i, word, n) &&
+            (i + n == S.cmdline_len || S.cmdline[i + n] == ' '))
+            return true;
+    return false;
+}
+
+/* N of "key=N" (key including the '=') in the command line, or 0. */
+static uint32_t cmdline_uint(const char *key)
+{
+    size_t n = 0;
+    uint32_t v = 0;
+
+    while (key[n])
+        n++;
+    for (uint32_t i = 0; i + n <= S.cmdline_len; i++)
+        if ((i == 0 || S.cmdline[i - 1] == ' ') && !memcmp(S.cmdline + i, key, n)) {
+            for (i += (uint32_t)n; i < S.cmdline_len && S.cmdline[i] >= '0' && S.cmdline[i] <= '9'; i++)
+                v = v * 10 + (uint32_t)(S.cmdline[i] - '0');
+            return v;
+        }
+    return 0;
+}
+
+/* The loader's own IDT from ExitBootServices to the handoff: an NMI, a
+ * machine check (broadcast to every CPU) or a fault now shows as a row of
+ * red squares, vector + 1 of them, instead of a silent hang. */
+struct __attribute__((packed)) idt_gate {
+    uint16_t off0, sel;
+    uint8_t  ist, type;
+    uint16_t off1;
+    uint32_t off2, zero;
+};
+static struct idt_gate g_idt[32];
+extern const uint8_t exc_stubs[]; /* exc.S */
+__attribute__((noreturn)) void exc_report(uint32_t vec);
+
+static void install_idt(void)
+{
+    struct __attribute__((packed)) {
+        uint16_t limit;
+        uint64_t base;
+    } r = {sizeof(g_idt) - 1, (uintptr_t)g_idt};
+    uint16_t cs;
+
+    __asm__ volatile("mov %%cs, %0" : "=r"(cs));
+    for (uint32_t i = 0; i < 32; i++) {
+        uint64_t a = (uintptr_t)exc_stubs + 16 * (uint64_t)i;
+
+        g_idt[i] = (struct idt_gate){(uint16_t)a, cs, 0, 0x8E, (uint16_t)(a >> 16), (uint32_t)(a >> 32), 0};
+    }
+    __asm__ volatile("lidt %0" : : "m"(r));
+}
+
+#if BOOT_LOG
+/* After ExitBootServices nothing can print, so progress shows as squares
+ * in the top-left corner: one per step (green), then a row with one per
+ * CPU (green: running or parked, red: did not start). The kernel paints
+ * over them; if the boot stops, they say where. */
+static void fb_square(uint32_t x, uint32_t y, uint32_t size, bool good)
+{
+    const struct boot_framebuffer *fb = S.fb;
+    uint8_t r = good ? 0x40 : 0xFF, g = good ? 0xE0 : 0x40, b = 0x40;
+    uint32_t px;
+
+    if (!fb->base || x + size > fb->width || y + size > fb->height || fb->red_size > 8 || fb->green_size > 8 ||
+        fb->blue_size > 8)
+        return;
+    px = ((uint32_t)(r >> (8 - fb->red_size)) << fb->red_shift) |
+         ((uint32_t)(g >> (8 - fb->green_size)) << fb->green_shift) |
+         ((uint32_t)(b >> (8 - fb->blue_size)) << fb->blue_shift);
+    for (uint32_t j = 0; j < size; j++) {
+        volatile uint32_t *row = (volatile uint32_t *)(uintptr_t)(fb->base + (uint64_t)(y + j) * fb->pitch) + x;
+        for (uint32_t i = 0; i < size; i++)
+            row[i] = px;
+    }
+}
+
+/* SFENCE: the framebuffer may be write-combining now; a square must be
+ * on screen before whatever comes next can stop the CPU. */
+static void stage(int n)
+{
+    fb_square(16 + (uint32_t)(n - 1) * 40, 16, 32, true);
+    __asm__ volatile("sfence" : : : "memory");
+}
+/* Heartbeat ticks (one per ms of waiting) are a thin bar under the squares. */
+static void smp_stage(int n)
+{
+    if (n >= SMP_STAGE_TICK) {
+        fb_square(16 + (uint32_t)(n - SMP_STAGE_TICK) % 200 * 6, 52, 4, true);
+        __asm__ volatile("sfence" : : : "memory");
+    } else {
+        stage(STAGE_SMP + n);
+    }
+}
+
+/* The per-CPU row, then three rows counting the APs that reached the
+ * trampoline's 16-, 32- and 64-bit code. */
+static void show_cpus(void)
+{
+    uint32_t seen[3];
+
+    for (uint32_t i = 0; i < S.smp_count; i++)
+        fb_square(16 + (i % 64) * 20, 64 + (i / 64) * 20, 14, S.smp_cpus[i].state != BOOT_SMP_OFF);
+    smp_tramp_seen(S.tramp_page, seen);
+    for (uint32_t r = 0; r < 3; r++)
+        for (uint32_t i = 0; i < seen[r] && i < 64; i++)
+            fb_square(16 + i * 20, 104 + r * 20, 14, true);
+    __asm__ volatile("sfence" : : : "memory");
+}
+
+void exc_report(uint32_t vec)
+{
+    for (uint32_t i = 0; i <= vec; i++)
+        fb_square(16 + i * 40, 184, 32, false);
+    __asm__ volatile("sfence" : : : "memory");
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+#else
+static void stage(int n) { (void)n; }
+#define smp_stage NULL
+static void show_cpus(void) {}
+
+void exc_report(uint32_t vec)
+{
+    (void)vec;
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+#endif
+
+/* Linux's rule (arch/x86/kernel/smpboot.c): Intel family 6 from model 0x0F
+ * (Core 2) and later families, and AMD from family 0x10, need no wait after
+ * INIT; older CPUs get the SDM's 10 ms. */
+static uint32_t init_delay_us(void)
+{
+    const struct boot_cpu *c = S.cpu;
+    bool intel = !memcmp(c->vendor, "GenuineIntel", 12), amd = !memcmp(c->vendor, "AuthenticAMD", 12);
+
+    if ((intel && ((c->family == 6 && c->model >= 0x0F) || c->family > 6)) || (amd && c->family >= 0x10))
+        return 10;
+    return 10000;
+}
+
+/* What every CPU runs the kernel with: SSE on, and XSAVE with x87, SSE,
+ * AVX and AVX-512 where the CPU has them (CPUID 0Dh: what XCR0 may hold).
+ * Applied after ExitBootServices, so firmware never sees it. */
+static void plan_cpu_state(void)
+{
+    uint32_t r[4];
+
+    S.cr0 = (read_cr0() & ~CR0_EM) | CR0_MP | CR0_NE | CR0_WP;
+    S.cr4 = read_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT;
+    S.xcr0 = 0;
+    if (S.cpu->features & BOOT_CPU_XSAVE) {
+        uint64_t ok;
+
+        cpuid(0x0D, 0, r);
+        ok = r[0] | ((uint64_t)r[3] << 32);
+        S.xcr0 = XCR0_X87 | XCR0_SSE;
+        if ((S.cpu->features & BOOT_CPU_AVX) && (ok & XCR0_AVX))
+            S.xcr0 |= XCR0_AVX;
+        if ((S.xcr0 & XCR0_AVX) && (S.cpu->features & BOOT_CPU_AVX512F) && (ok & XCR0_AVX512) == XCR0_AVX512)
+            S.xcr0 |= XCR0_AVX512;
+        S.cr4 |= CR4_OSXSAVE;
+    }
+}
+
+/* The AP list in the arena, and the trampoline in a page below 1 MiB.
+ * Without the page (low memory taken) or a table root below 4 GiB, the
+ * APs stay as firmware left them and the list says so. */
+static void plan_smp(uint8_t *stacks, uint64_t gdtr_base, uint16_t gdtr_limit)
+{
+    struct smp_tramp_params p;
+    EFI_PHYSICAL_ADDRESS page = 0x9F000; /* below the EBDA and VGA holes */
+
+    for (uint32_t i = 0; i < S.smp_count; i++) {
+        struct boot_smp_cpu *c = &S.smp_cpus[i];
+
+        memset(c, 0, sizeof(*c));
+        c->apic_id = S.smp->cpu[i].apic_id;
+        c->acpi_uid = S.smp->cpu[i].acpi_uid;
+        if (i == 0)
+            c->state = BOOT_SMP_BSP;
+        else
+            c->stack_top = BOOT_HHDM_BASE + (uintptr_t)stacks + (uint64_t)i * SMP_AP_STACK_SIZE;
+    }
+    if (S.smp_count < 2 || S.nosmp || (uintptr_t)S.pt.root >= GiB(4) ||
+        EFI_ERROR(g_uefi.bs->AllocatePages(AllocateMaxAddress, EfiLoaderData, 1, &page)))
+        return;
+    S.tramp_page = page;
+    p = (struct smp_tramp_params){
+        .cr3 = (uintptr_t)S.pt.root,
+        .cr0 = S.cr0,
+        .cr4 = CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT | (S.la57 ? CR4_LA57 : 0) | (S.xcr0 ? CR4_OSXSAVE : 0),
+        .efer_set = EFER_LME | (S.nx ? EFER_NXE : 0),
+        .pat = PAT_LINUX,
+        .xcr0 = S.xcr0,
+        .gdtr_base = gdtr_base,
+        .gdtr_limit = gdtr_limit,
+        .cpus = BOOT_HHDM_BASE + (uintptr_t)S.smp_cpus,
+        .ncpus = S.smp_count,
+        .stop = S.smpstop,
+    };
+    smp_tramp_install(page, &p);
+}
+
 /*
  * One allocation holds everything the kernel receives. Its size is computed
  * up front from upper bounds, so nothing is reallocated:
- *   page tables | 64 KiB stack | boot_info | GDT | modules | memory map | cmdline
+ *   page tables | 64 KiB stack | boot_info | GDT | modules | memory map |
+ *   cmdline | log | CPU list | AP stacks
+ * It is placed below 4 GiB when possible: APs load CR3 in 32-bit mode.
  */
 static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
 {
@@ -488,7 +723,7 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     EFI_PHYSICAL_ADDRESS addr;
     uint64_t size, *gdt, fb_lo = 0, fb_hi = 0;
     struct gdtr *gdtr;
-    uint8_t *pool, *stack;
+    uint8_t *pool, *stack, *ap_stacks = NULL;
     char *cmdline;
     EFI_STATUS s;
 
@@ -515,14 +750,24 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
             fb_hi = fb_lo;
     }
     build_carves();
+    plan_cpu_state();
+    if (!S.cpu->tsc_hz && S.smp->count > 1)
+        calibrate_tsc(); /* AP startup times its waits with the TSC */
+    S.smp_count = S.smp->count;
+    S.nosmp = cmdline_has("nosmp");
+    S.smpstop = (uint16_t)cmdline_uint("smpstop=");
     S.pt_bound = pt_pages_bound(span, S.hhdm_size, S.hhdm_1g, S.la57, fb_hi - fb_lo);
     /* Each carve can split one entry into three; +2 margin. */
     S.mmap_cap = uefi_mmap_capacity(&S.mem->map) + 2 * S.ncarve + 2;
     size = (uint64_t)S.pt_bound * PAGE_SIZE + KERNEL_STACK_SIZE + sizeof(struct boot_info) + 64 +
            (uint64_t)S.nmod * sizeof(struct boot_module) + 16 +
-           (uint64_t)S.mmap_cap * sizeof(struct boot_mem_entry) + S.cmdline_len + 1 + CON_LOG_MAX + 64;
+           (uint64_t)S.mmap_cap * sizeof(struct boot_mem_entry) + S.cmdline_len + 1 + CON_LOG_MAX + 64 +
+           (uint64_t)S.smp_count * sizeof(struct boot_smp_cpu) + 64 +
+           (S.smp_count > 1 ? (uint64_t)S.smp_count * SMP_AP_STACK_SIZE + PAGE_SIZE : 0);
     S.arena_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    if (EFI_ERROR(s = g_uefi.bs->AllocatePages(AllocateAnyPages, EfiLoaderData, S.arena_pages, &addr))) {
+    addr = GiB(4) - 1;
+    if (EFI_ERROR(g_uefi.bs->AllocatePages(AllocateMaxAddress, EfiLoaderData, S.arena_pages, &addr)) &&
+        EFI_ERROR(s = g_uefi.bs->AllocatePages(AllocateAnyPages, EfiLoaderData, S.arena_pages, &addr))) {
         S.arena_pages = 0;
         return fail(L"no memory for boot data", NULL, s);
     }
@@ -539,13 +784,17 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     S.mmap = arena_alloc(&S.arena, (uint64_t)S.mmap_cap * sizeof(struct boot_mem_entry), 8);
     cmdline = arena_alloc(&S.arena, S.cmdline_len + 1, 1);
     S.log = arena_alloc(&S.arena, CON_LOG_MAX, 8);
-    if (!pool || !stack || !S.bi || !gdt || !gdtr || !S.bmods || !S.mmap || !cmdline || !S.log)
+    S.smp_cpus = arena_alloc(&S.arena, (uint64_t)S.smp_count * sizeof(struct boot_smp_cpu), 64);
+    if (S.smp_count > 1) /* one stack per AP; the last slot is spare */
+        ap_stacks = arena_alloc(&S.arena, (uint64_t)S.smp_count * SMP_AP_STACK_SIZE, PAGE_SIZE);
+    if (!pool || !stack || !S.bi || !gdt || !gdtr || !S.bmods || !S.mmap || !cmdline || !S.log ||
+        (S.smp_count && !S.smp_cpus) || (S.smp_count > 1 && !ap_stacks))
         return fail(L"boot data arena too small", NULL, EFI_OUT_OF_RESOURCES);
 
     if (!pt_init(&S.pt, pool, S.pt_bound, S.la57, S.nx) ||
         !pt_map(&S.pt, BOOT_HHDM_BASE, 0, S.hhdm_size, PT_W, S.hhdm_1g ? GiB(1) : MiB(2)) ||
         !map_kernel() ||
-        (fb_hi > fb_lo && !pt_map(&S.pt, BOOT_HHDM_BASE + fb_lo, fb_lo, fb_hi - fb_lo, PT_W | PT_UC, MiB(2))) ||
+        (fb_hi > fb_lo && !pt_map(&S.pt, BOOT_HHDM_BASE + fb_lo, fb_lo, fb_hi - fb_lo, PT_W | PT_WC, MiB(2))) ||
         !pt_map(&S.pt, trampoline, trampoline, 2 * PAGE_SIZE, PT_X, PAGE_SIZE))
         return fail(L"page table construction failed", NULL, EFI_OUT_OF_RESOURCES);
 
@@ -556,6 +805,12 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     gdtr->base = BOOT_HHDM_BASE + (uintptr_t)gdt;
     S.gdtr_virt = BOOT_HHDM_BASE + (uintptr_t)gdtr;
     S.stack_top_virt = BOOT_HHDM_BASE + (uintptr_t)stack + KERNEL_STACK_SIZE;
+
+    /* After the page tables: the trampoline page joins them. Entry i's
+     * stack is [(i - 1), i) * SMP_AP_STACK_SIZE into ap_stacks. */
+    plan_smp(ap_stacks, gdtr->base, gdtr->limit);
+    if (S.tramp_page && !pt_map(&S.pt, S.tramp_page, S.tramp_page, PAGE_SIZE, PT_W | PT_X, PAGE_SIZE))
+        return fail(L"page table construction failed", NULL, EFI_OUT_OF_RESOURCES);
 
     if (S.cmdline_len)
         memcpy(cmdline, S.cmdline, S.cmdline_len);
@@ -599,7 +854,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     g_uefi.st = st;
     g_uefi.bs = st->BootServices;
     con_init(st->ConOut);
-    con_max_mode();
+    con_pick_mode();
     PROF_SET(PROF_ENTRY, tsc_entry);
 
     s = g_uefi.bs->HandleProtocol(image, &g_guid_loaded_image, (void **)&g_uefi.li);
@@ -627,6 +882,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     S.csme = discover_csme();
     S.csme_clients = discover_csme_clients();
     PROF_MARK(PROF_CSME);
+    S.smp = discover_smp();
 #if BOOT_LOG
     report_discovery(&S);
 #endif
@@ -675,9 +931,40 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     S.bi->efi_mmap_desc_version = S.mem->map.desc_version;
     n = uefi_mmap_normalize(&S.mem->map, S.mmap, S.mmap_cap, S.carve, S.ncarve);
     S.bi->mmap_count = mmap_sort_merge(S.mmap, n);
+    install_idt();
+    stage(STAGE_EXITED);
     if (S.nx)
         wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_NXE); /* before NX bits become live */
-    write_cr0(read_cr0() | CR0_WP);                  /* kernel R/O pages are R/O to CPL0 too */
+    write_cr0(S.cr0);                                /* WP: kernel R/O pages are R/O to CPL0 too; SSE */
+    write_cr4(S.cr4);
+    if (S.xcr0) {
+        uint32_t r[4];
+
+        xsetbv0(S.xcr0);
+        cpuid(0x0D, 0, r); /* EBX: XSAVE area size for the XCR0 just set */
+        S.bi->xsave_size = r[1];
+    }
+    stage(STAGE_CPU_STATE);
+    /* PWT-only PTEs exist only in the kernel's tables, which are not live
+     * yet; flush anything cached under the old meaning anyway. */
+    wbinvd();
+    wrmsr(MSR_PAT, PAT_LINUX);
+    stage(STAGE_PAT);
+    if (S.tramp_page) {
+        bool x2apic;
+        uint32_t self;
+
+        S.bi->smp_parked =
+            smp_start_aps(S.tramp_page, S.smp_cpus, S.smp_count, S.cpu->tsc_hz, init_delay_us(), &x2apic, &self,
+                          smp_stage);
+        S.bi->smp_flags = x2apic ? BOOT_SMP_F_X2APIC : 0;
+        S.smp_cpus[0].apic_id = self; /* what the BSP's local APIC says, if CPUID disagreed */
+        show_cpus();
+        if (S.smpstop) /* time to read the rows before the kernel paints over them */
+            for (uint64_t t0 = rdtsc(); rdtsc() - t0 < 5 * S.cpu->tsc_hz;)
+                __asm__ volatile("pause");
+    }
+    stage(STAGE_HANDOFF);
     S.bi->tsc_handoff = rdtsc();
     boot_handoff((uintptr_t)S.pt.root, S.gdtr_virt, S.stack_top_virt,
                  BOOT_HHDM_BASE + (uintptr_t)S.bi, S.elf.entry);

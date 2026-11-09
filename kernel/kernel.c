@@ -258,12 +258,13 @@ static void group_end(void) { tag(g_fail == g_group_fail); }
 struct mapping {
     bool present, writable, executable;
     uint64_t phys;
+    uint8_t pat_index; /* PAT entry the leaf selects: PAT<<2 | PCD<<1 | PWT */
 };
 
 /* Walk the live page tables through the HHDM (Intel SDM 3A 4.5). */
 static struct mapping lookup(const struct boot_info *bi, uint64_t va)
 {
-    struct mapping m = {false, true, true, 0};
+    struct mapping m = {false, true, true, 0, 0};
     uint64_t cr3, table;
     int level = (bi->flags & BOOT_F_LA57) ? 5 : 4;
 
@@ -280,8 +281,11 @@ static struct mapping lookup(const struct boot_info *bi, uint64_t va)
             m.executable = false;
         if (level == 1 || (level <= 3 && (e & 0x80))) {
             uint64_t mask = (1ull << shift) - 1;
+            uint64_t pat_bit = level == 1 ? (1ull << 7) : (1ull << 12);
+
             m.present = true;
-            m.phys = ((e & PTE_ADDR) & ~mask) | (va & mask);
+            m.phys = ((e & PTE_ADDR) & ~mask) | (va & mask); /* ~mask also drops a large page's PAT bit 12 */
+            m.pat_index = (uint8_t)(((e & pat_bit) ? 4 : 0) | ((e >> 3) & 3));
             return m;
         }
         table = e & PTE_ADDR;
@@ -377,9 +381,27 @@ static void check_machine_state(const struct boot_info *bi, uint64_t entry_rsp)
     check(!!(efer & EFER_NXE) == nx, "EFER.NXE matches BOOT_F_NX");
     check(!!(cr4 & CR4_LA57) == !!(bi->flags & BOOT_F_LA57), "CR4.LA57 matches BOOT_F_LA57");
     check(cs == 0x08 && ss == 0x10, "CS = 0x08, SS = 0x10");
+    check(rdmsr(MSR_PAT) == bi->pat && ((bi->pat >> 8) & 0xFF) == 0x01, "PAT as boot_info.pat, entry 1 WC");
+    check(!(cr0 & CR0_EM) && (cr0 & CR0_MP) && (cr4 & CR4_OSFXSR) && (cr4 & CR4_OSXMMEXCPT),
+          "SSE enabled: CR0.EM clear, CR0.MP, CR4.OSFXSR, CR4.OSXMMEXCPT");
+    /* With no IDT, a #UD here would reset the machine: the test fails loudly. */
+    __asm__ volatile("xorps %xmm0, %xmm0");
+    if (bi->cpu.features & BOOT_CPU_XSAVE) {
+        bool on = (cr4 & CR4_OSXSAVE) != 0;
+
+        check(on && xgetbv0() == bi->xcr0 && (bi->xcr0 & 3) == 3 && bi->xsave_size >= 576,
+              "XSAVE on: XCR0 as boot_info.xcr0, xsave_size set");
+        if (on && (bi->xcr0 & XCR0_AVX))
+            __asm__ volatile("vxorps %ymm0, %ymm0, %ymm0");
+    }
     group_end();
     kputs("Verified CPU state: long mode, interrupts off");
-    kputs(nx ? ", NX on\n" : "\n");
+    kputs(nx ? ", NX on, SSE" : ", SSE");
+    if (bi->xcr0 & XCR0_AVX)
+        kputs(", AVX");
+    if (bi->xcr0 & XCR0_AVX512)
+        kputs(", AVX-512");
+    kputc('\n');
 }
 
 /* First and last byte of the framebuffer must be mapped to themselves:
@@ -421,11 +443,15 @@ static void check_mappings(const struct boot_info *bi)
           "boot_info pointer inside the HHDM");
     if (bi->framebuffer.base)
         check(fb_mapped(bi), "framebuffer mapped writable at hhdm_base + base");
+    if (bi->flags & BOOT_F_FB_WC)
+        check(lookup(bi, bi->hhdm_base + bi->framebuffer.base).pat_index == 1 &&
+                  lookup(bi, bi->hhdm_base + bi->framebuffer.base + bi->framebuffer.size - 1).pat_index == 1,
+              "framebuffer mapped write-combining (PAT entry 1)");
     group_end();
     kputs("Verified page tables: kernel sections, direct map of ");
     put_dec(bi->hhdm_size >> 20);
     kputs(" MiB");
-    kputs(bi->framebuffer.base ? ", framebuffer\n" : "\n");
+    kputs(!bi->framebuffer.base ? "\n" : (bi->flags & BOOT_F_FB_WC) ? ", framebuffer (WC)\n" : ", framebuffer\n");
 }
 
 static bool mmap_covers(const struct boot_info *bi, uint64_t base, uint64_t len, uint32_t type)
@@ -682,6 +708,98 @@ static void check_csme(const struct boot_info *bi)
     kputc('\n');
 }
 
+/* ---- application processors ------------------------------------------ */
+
+static const struct boot_info *g_bi;
+static volatile uint32_t g_ap_arrived, g_ap_good;
+
+/* Where a released AP jumps: RDI = its boot_smp_cpu, RSP = its stack with
+ * a fake return address. It checks it was set up like the BSP, reports,
+ * and halts for good. */
+__attribute__((noreturn, used)) static void ap_main(struct boot_smp_cpu *self)
+{
+    const struct boot_info *bi = g_bi;
+    uint64_t rsp, rflags, cr0, cr4;
+    uint32_t r[4];
+    bool ok;
+
+    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags));
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cpuid(1, 0, r);
+    ok = !(rflags & (1u << 9)) && rsp < self->stack_top && rsp > self->stack_top - 0x4000 &&
+         rdmsr(MSR_PAT) == bi->pat && !(cr0 & CR0_EM) && (cr0 & CR0_WP) && (cr4 & CR4_OSFXSR) &&
+         !!(cr4 & CR4_LA57) == !!(bi->flags & BOOT_F_LA57) &&
+         !!(rdmsr(MSR_EFER) & EFER_NXE) == !!(bi->flags & BOOT_F_NX) &&
+         (!bi->xcr0 || ((cr4 & CR4_OSXSAVE) && xgetbv0() == bi->xcr0)) &&
+         self->extra_argument == 0x4150; /* "AP": what the BSP put there */
+    if (ok)
+        __atomic_fetch_add(&g_ap_good, 1, __ATOMIC_SEQ_CST);
+    __atomic_fetch_add(&g_ap_arrived, 1, __ATOMIC_SEQ_CST);
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+
+/* `word` as a whole word of the command line. */
+static bool cmdline_has(const struct boot_info *bi, const char *word)
+{
+    const char *start = bi->cmdline ? (const char *)(bi->hhdm_base + bi->cmdline) : "", *p;
+
+    for (p = start; *p; p++) {
+        size_t i = 0;
+
+        if (p != start && p[-1] != ' ')
+            continue;
+        while (word[i] && p[i] == word[i])
+            i++;
+        if (!word[i] && (p[i] == ' ' || !p[i]))
+            return true;
+    }
+    return false;
+}
+
+static void check_smp(const struct boot_info *bi)
+{
+    struct boot_smp_cpu *cpus = (struct boot_smp_cpu *)(bi->hhdm_base + bi->smp_cpus);
+    uint64_t hz = bi->cpu.tsc_hz ? bi->cpu.tsc_hz : 2000000000ull, t0;
+    uint32_t parked = 0;
+
+    if (!bi->smp_count) {
+        kputs("No CPU list: the loader found no MADT\n");
+        return;
+    }
+    for (uint32_t i = 0; i < bi->smp_count; i++)
+        parked += cpus[i].state == BOOT_SMP_PARKED;
+    group_begin();
+    check(bi->smp_cpus && cpus[0].state == BOOT_SMP_BSP && cpus[0].apic_id == bi->cpu.bsp_apic_id,
+          "CPU list starts with the BSP");
+    check(parked == bi->smp_parked, "smp_parked matches the entries");
+    if (cmdline_has(bi, "nosmp"))
+        check(bi->smp_parked == 0, "nosmp: no AP started");
+    else
+        check(bi->smp_parked == bi->smp_count - 1, "every CPU of the MADT parked");
+
+    g_bi = bi;
+    for (uint32_t i = 0; i < bi->smp_count; i++)
+        if (cpus[i].state == BOOT_SMP_PARKED) {
+            cpus[i].extra_argument = 0x4150;
+            __atomic_store_n(&cpus[i].goto_address, (uint64_t)(uintptr_t)ap_main, __ATOMIC_RELEASE);
+        }
+    t0 = rdtsc();
+    while (g_ap_arrived < parked && rdtsc() - t0 < hz)
+        __asm__ volatile("pause");
+    check(g_ap_arrived == parked, "every parked AP reached the kernel within 1 s");
+    check(g_ap_good == g_ap_arrived, "APs run with the BSP's CR0, CR4, EFER, PAT, XCR0, own stack");
+    group_end();
+    kputs("Started ");
+    put_dec(g_ap_arrived);
+    kputs(" of ");
+    put_dec(bi->smp_count - 1);
+    kputs(bi->smp_count == 2 ? " application processor" : " application processors");
+    kputs((bi->smp_flags & BOOT_SMP_F_X2APIC) ? " (x2APIC)\n" : "\n");
+}
+
 static void print_info(const struct boot_info *bi, uint64_t tsc_kernel)
 {
     const struct boot_cpu *c = &bi->cpu;
@@ -788,6 +906,7 @@ __attribute__((noreturn)) void kmain(const struct boot_info *bi, uint64_t entry_
         check_memory_map(bi);
         check_firmware_tables(bi);
         check_csme(bi);
+        check_smp(bi);
         check_modules(bi);
         check_handover(bi);
     }

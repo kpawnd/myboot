@@ -11,7 +11,7 @@
 
 #define PTE_P    (1ull << 0)
 #define PTE_W    (1ull << 1)
-#define PTE_PCD  (1ull << 4)  /* same bit at every level, unlike the PAT bit */
+#define PTE_PWT  (1ull << 3)  /* PWT and PCD: same bit at every level, unlike the PAT bit */
 #define PTE_PS   (1ull << 7)  /* large page at PDPT (1 GiB) / PD (2 MiB) level */
 #define PTE_NX   (1ull << 63)
 #define PTE_ADDR 0x000FFFFFFFFFF000ull
@@ -66,7 +66,7 @@ bool pt_init(struct pt_builder *b, void *pool, uint32_t pool_pages, bool la57, b
 bool pt_map(struct pt_builder *b, uint64_t virt, uint64_t phys, uint64_t size,
             uint32_t prot, uint64_t max_page)
 {
-    uint64_t leaf = PTE_P | ((prot & PT_W) ? PTE_W : 0) | ((prot & PT_UC) ? PTE_PCD : 0) |
+    uint64_t leaf = PTE_P | ((prot & PT_W) ? PTE_W : 0) | ((prot & PT_WC) ? PTE_PWT : 0) |
                     ((b->nx && !(prot & PT_X)) ? PTE_NX : 0);
 
     if ((virt | phys | size) & (PAGE_SIZE - 1))
@@ -118,7 +118,7 @@ uint32_t pt_pages_bound(uint64_t kernel_span, uint64_t hhdm_size, bool hhdm_1g, 
 {
     uint64_t n = 1 + (la57 ? 1 : 0);                  /* PML4 (+ PML5) */
 
-    n += 6;                                           /* identity window: 2 x (PDPT, PD, PT) */
+    n += 9;                                           /* identity windows: 3 x (PDPT, PD, PT) */
     n += (hhdm_size + GiB(512) - 1) / GiB(512);       /* HHDM PDPTs */
     if (!hhdm_1g)
         n += (hhdm_size + GiB(1) - 1) / GiB(1);       /* HHDM PDs */

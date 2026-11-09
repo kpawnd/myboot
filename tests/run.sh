@@ -18,6 +18,7 @@ CONFIG=${CONFIG:-debug}
 QEMU=${QEMU:-qemu-system-x86_64}
 QEMU_SHARE=${QEMU_SHARE:-C:/Program Files/qemu/share}
 QEMU_MEM=${QEMU_MEM:-256M}
+QEMU_SMP=${QEMU_SMP:-4}
 LOADER=build/$CONFIG/esp/EFI/BOOT/BOOTX64.EFI
 KERNEL=build/kernel/kernel.elf
 MODULE=kernel/selftest.mod
@@ -55,7 +56,7 @@ qemu() {
     shift
     vars=$OUT/$name.vars.fd
     cp "$QEMU_SHARE/edk2-i386-vars.fd" "$vars"
-    timeout 90 "$QEMU" -machine q35 -m "$QEMU_MEM" -net none -no-reboot \
+    timeout 90 "$QEMU" -machine q35 -m "$QEMU_MEM" -smp "$QEMU_SMP" -net none -no-reboot \
         -drive "if=pflash,format=raw,readonly=on,file=$QEMU_SHARE/edk2-x86_64-code.fd" \
         -drive "if=pflash,format=raw,file=$vars" \
         -drive "if=virtio,readonly=on,format=raw,file=fat:$OUT/$name" \
@@ -195,7 +196,7 @@ expect_boot shipped "MYBOOT boot menu" "boot entry     : 1 (Test kernel with sel
     "Loaded module \\EFI\\MYBOOT\\SELFTEST.MOD (170 bytes)" \
     "Command line: selftest modules=1" "Starting kernel ..." \
     "Read configuration \\EFI\\MYBOOT\\BOOT.CFG (2 entries)" \
-    "Finished self-test: 34 checks passed, 0 failed"
+    "Finished self-test: 42 checks passed, 0 failed"
 
 # No BOOT.CFG: the built-in default entry, no modules.
 esp no-config > /dev/null
@@ -466,7 +467,7 @@ EOF
 DISK=$EXT4_IMG expect_boot ext4-label \
     "Found volume label=myboot-ext4 (ext4, PARTUUID $EXT4_PARTUUID)" \
     "Loaded kernel /vmlinuz-myboot (" "Loaded module /boot/selftest.mod (170 bytes)" \
-    "Finished self-test: 34 checks passed, 0 failed"
+    "Finished self-test: 42 checks passed, 0 failed"
 DISK=
 
 d=$(esp ext2-partuuid)
@@ -479,7 +480,7 @@ module /boot/selftest.mod selftest
 EOF
 DISK=$EXT2_IMG expect_boot ext2-partuuid \
     "Found volume partuuid=0BADF00D-01 (ext4, PARTUUID 0badf00d-01)" \
-    "Loaded kernel /boot/kernel.elf (" "Finished self-test: 34 checks passed, 0 failed"
+    "Loaded kernel /boot/kernel.elf (" "Finished self-test: 42 checks passed, 0 failed"
 DISK=
 
 # An entry whose volume is missing falls back, and so does one whose file

@@ -16,9 +16,12 @@ void con_init(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out)
     g_con = out;
 }
 
-void con_max_mode(void)
+static struct con_mode g_modes[CON_MODES_MAX];
+static uint32_t g_nmodes;
+
+void con_pick_mode(void)
 {
-    UINTN best = 0, best_cells = 0;
+    UINTN best = 0, best_cells = 0, fit = 0, fit_cells = 0;
 
     if (!g_con->Mode || !g_con->SetMode)
         return;
@@ -28,13 +31,30 @@ void con_max_mode(void)
         /* Mode 1 (80x50) may be listed but unsupported: QueryMode fails. */
         if (EFI_ERROR(g_con->QueryMode(g_con, m, &c, &r)) || c > 1000 || r > 1000)
             continue;
+        if (g_nmodes < CON_MODES_MAX)
+            g_modes[g_nmodes++] = (struct con_mode){(uint32_t)m, (uint32_t)c, (uint32_t)r};
         if (c * r > best_cells) {
             best_cells = c * r;
             best = m;
         }
+        if (r <= CON_PICK_ROWS && c * r > fit_cells) {
+            fit_cells = c * r;
+            fit = m;
+        }
     }
+    /* 80x25 always fits, and on a large panel it is the stretched picture
+     * this avoids: only a fitting mode beyond it counts. */
+    if (fit_cells > 80 * 25)
+        best = fit;
     if (best_cells && best != (UINTN)g_con->Mode->Mode)
         g_con->SetMode(g_con, best); /* clears the screen; on failure the mode stays */
+}
+
+uint32_t con_modes(const struct con_mode **modes, uint32_t *current)
+{
+    *modes = g_modes;
+    *current = g_con->Mode ? (uint32_t)g_con->Mode->Mode : 0;
+    return g_nmodes;
 }
 
 static void log_append(const CHAR16 *s)

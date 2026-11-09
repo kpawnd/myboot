@@ -63,7 +63,8 @@ typedef struct {
 #define EFI_BOOT_SERVICES_SIGNATURE 0x56524553544F4F42ULL /* "BOOTSERV" */
 
 /* 7.2 Memory allocation services */
-#define AllocateAnyPages 0u
+#define AllocateAnyPages   0u
+#define AllocateMaxAddress 1u /* *Memory in: highest acceptable address */
 
 enum {
     EfiReservedMemoryType, EfiLoaderCode, EfiLoaderData, EfiBootServicesCode,
