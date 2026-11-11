@@ -13,6 +13,10 @@
 #                                          test images against 7-Zip, plus fuzzing
 #   make test-csme                         CSME detection on the host, against a
 #                                          simulated HECI device
+#   make test-jpeg                         the menu background's JPEG decoder on the
+#                                          host, against Windows GDI+, plus fuzzing
+#   make screenshots                       PNGs of the menu, editor and boot log for the
+#                                          README, into build/$(CONFIG)/screenshots
 #   make run-gdb                           like run, paused, gdbstub on :1234
 #   make iso                               build/$(CONFIG)/myboot.iso (UEFI, hybrid CD/USB)
 #   make run-iso                           boot that ISO in QEMU as a CD-ROM
@@ -25,6 +29,7 @@ EFI    := $(ESP)/EFI/BOOT/BOOTX64.EFI
 ESP_KERNEL := $(ESP)/EFI/MYBOOT/KERNEL.ELF
 ESP_CFG    := $(ESP)/EFI/MYBOOT/BOOT.CFG
 ESP_MOD    := $(ESP)/EFI/MYBOOT/SELFTEST.MOD
+ESP_BG     := $(ESP)/EFI/MYBOOT/BACKGROUND.JPG
 
 CC    := clang
 LD    := lld-link
@@ -90,6 +95,8 @@ SRCS := src/firmware/uefi/entry.c \
         src/firmware/uefi/error.c \
         src/firmware/uefi/chain.c \
         src/firmware/uefi/volume.c \
+        src/firmware/uefi/gfx.c \
+        src/image/jpeg.c \
         src/fs/fs.c \
         src/fs/ext4.c \
         src/config/config.c \
@@ -122,8 +129,8 @@ HOSTCC ?= gcc
 MKISO  := build/tools/mkiso.exe
 ISO    := $(BUILD)/myboot.iso
 
-.PHONY: all configs size run run-gdb test test-all test-fs test-csme iso run-iso clean
-all: $(EFI) $(ESP_KERNEL) $(ESP_CFG) $(ESP_MOD)
+.PHONY: all configs size run run-gdb test test-all test-fs test-csme test-jpeg screenshots iso run-iso clean
+all: $(EFI) $(ESP_KERNEL) $(ESP_CFG) $(ESP_MOD) $(ESP_BG)
 
 $(BUILD)/obj/%.obj: %.c Makefile
 	@mkdir -p $(dir $@)
@@ -160,13 +167,18 @@ $(ESP_MOD): kernel/selftest.mod
 	@mkdir -p $(dir $@)
 	cp $< $@
 
+$(ESP_BG): kernel/background.jpg
+	@mkdir -p $(dir $@)
+	cp $< $@
+
 $(MKISO): tools/mkiso.c
 	@mkdir -p $(dir $@)
 	$(HOSTCC) -O2 -Wall -Wextra -o $@ $<
 
-$(ISO): $(EFI) $(KERNEL) kernel/boot.cfg kernel/selftest.mod $(MKISO)
+$(ISO): $(EFI) $(KERNEL) kernel/boot.cfg kernel/selftest.mod kernel/background.jpg $(MKISO)
 	$(MKISO) $@ EFI/BOOT/BOOTX64.EFI=$(EFI) EFI/MYBOOT/KERNEL.ELF=$(KERNEL) \
-	  EFI/MYBOOT/BOOT.CFG=kernel/boot.cfg EFI/MYBOOT/SELFTEST.MOD=kernel/selftest.mod
+	  EFI/MYBOOT/BOOT.CFG=kernel/boot.cfg EFI/MYBOOT/SELFTEST.MOD=kernel/selftest.mod \
+	  EFI/MYBOOT/BACKGROUND.JPG=kernel/background.jpg
 
 iso: $(ISO)
 
@@ -299,6 +311,28 @@ test-csme: $(CSME_HOST) $(CSME_ASAN)
 	$(CSME_HOST)
 	for d in "$(LLVM_DIR)"/lib/clang/*/lib/windows; do PATH="$$(cygpath -u "$$d"):$$PATH"; done; \
 	$(CSME_ASAN)
+
+# --- host test of the JPEG decoder -------------------------------------------
+# src/image/jpeg.c compiled for Windows; tests/jpeg.py compares its output
+# with GDI+'s and fuzzes the AddressSanitizer build.
+JPEG_SRCS := tests/host/jpegdec.c src/image/jpeg.c
+JPEG_HOST := build/host/jpegdec.exe
+JPEG_ASAN := build/host/jpegdec-asan.exe
+
+$(JPEG_HOST): $(JPEG_SRCS) include/image/jpeg.h
+	@mkdir -p $(dir $@)
+	$(CC) $(FS_HOSTFLAGS) $(JPEG_SRCS) -o $@
+
+$(JPEG_ASAN): $(JPEG_SRCS) include/image/jpeg.h
+	@mkdir -p $(dir $@)
+	$(CC) $(FS_HOSTFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all $(JPEG_SRCS) -o $@
+
+test-jpeg: $(JPEG_HOST) $(JPEG_ASAN)
+	$(PYTHON) tests/jpeg.py $(FUZZ_RUNS)
+
+screenshots: all
+	@CONFIG=$(CONFIG) QEMU="$(QEMU)" QEMU_SHARE="$(QEMU_SHARE)" QEMU_SMP=$(QEMU_SMP) \
+	  sh tests/tools/screenshots.sh
 
 clean:
 	rm -rf build

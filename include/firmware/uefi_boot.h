@@ -180,6 +180,24 @@ EFI_STATUS chain_boot(const struct cfg_entry *e, struct uefi_vol *vol, const cha
  * Opens every volume, so it runs only when the menu is shown; once. */
 void chain_add_windows(struct boot_config *c);
 
+/* Graphical menu screen (gfx.c): the BOOT.CFG background picture scaled to
+ * cover the screen, and text drawn over it. Colours are 0xRRGGBB. */
+#define GFX_NONE 0xFFFFFFFFu        /* gfx_text: no bar, the picture shows */
+#define GFX_LINE(scale) (12 * (scale)) /* pixels from one text line to the next */
+/* GOP present and the picture loaded; false after a boot_error if the
+ * picture could not be used, or silently without GOP. */
+bool gfx_open(const char *cfg_path);
+void gfx_close(void);
+/* Screen size and font scale: glyphs are 8 * scale pixels wide. */
+void gfx_geometry(uint32_t *width, uint32_t *height, uint32_t *scale);
+/* Darken a rectangle of the picture (not yet shown) and frame it. */
+void gfx_panel(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t border);
+void gfx_show(void); /* the whole picture to the screen */
+/* One line of text, w pixels wide, starting `indent` pixels in: over a
+ * bar of colour `bar`, or over the picture if GFX_NONE. Cut at w. */
+void gfx_text(uint32_t x, uint32_t y, uint32_t w, uint32_t indent, const char *s, uint32_t fg,
+              uint32_t bar);
+
 /* Boot menu and recovery screen (menu.c). Reboot, power off and firmware
  * setup are carried out inside the menu and do not return. */
 enum menu_action {

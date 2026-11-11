@@ -10,6 +10,8 @@ or libc. It boots three kinds of entries:
   built for the kernel, and a documented machine state
   ([`include/bootinfo/bootinfo.h`](include/bootinfo/bootinfo.h)).
 
+![The boot menu over a background picture](screenshots/menu.png)
+
 Status: the UEFI path is complete and tested in QEMU + OVMF. The legacy BIOS
 backend is not started. It has not yet been run on real hardware.
 
@@ -25,8 +27,10 @@ make test                              # one headless boot; passes on exit statu
 make test-all                          # every scenario in tests/run.sh
 make test-fs                           # filesystem driver on the host (needs Python, 7-Zip)
 make test-csme                         # CSME detection and HBM on the host, simulated device
+make test-jpeg                         # menu background decoder on the host, against GDI+
 make iso                               # build/$CONFIG/myboot.iso, hybrid CD/USB image
 make size                              # binary sizes
+make screenshots                       # the README's pictures, from QEMU, into build/$CONFIG/screenshots
 ```
 
 The loader prints a boot log in the style of systemd, one tagged line per
@@ -49,6 +53,8 @@ kernel shows it again on its own screen, followed by its checks, one line at
 a time when its command line has `log_delay=MS` (the shipped BOOT.CFG uses
 40 ms).
 
+![The loader's log and the test kernel's checks, as the test kernel shows them](screenshots/boot-log.png)
+
 `make test-all` also chainloads a small test program and, when a Linux
 kernel with an EFI stub is available (`LINUX_KERNEL`, `LINUX_INITRD`; the
 WSL kernel by default), boots Linux with an initrd.
@@ -59,6 +65,7 @@ WSL kernel by default), boots Linux with an initrd.
 \EFI\BOOT\BOOTX64.EFI      the loader (removable-media path), or anywhere else
 \EFI\MYBOOT\BOOT.CFG       configuration (optional)
 \EFI\MYBOOT\KERNEL.ELF     kernel used when there is no BOOT.CFG
+\EFI\MYBOOT\BACKGROUND.JPG menu picture, if BOOT.CFG names it (optional)
 \EFI\MYBOOT\...            kernels and modules BOOT.CFG names
 ```
 
@@ -71,6 +78,7 @@ firmware boot entry's load options as the command line.
 # comment
 timeout 3                    # seconds the menu waits; 0 or absent = no menu
 default 1                    # 1-based entry booted when the countdown ends
+background BACKGROUND.JPG    # menu picture (optional; see "The menu")
 
 entry My kernel              # title shown in the menu
 kernel KERNEL.ELF            # relative paths are under \EFI\MYBOOT\
@@ -162,6 +170,12 @@ Up/Down select, Enter boot, e edit command line, 1-9 boot that entry
 Booting the selected entry in 10 s. Press any key to stop.
 ```
 
+Without a background picture the menu is plain text, and **e** opens the
+command-line editor:
+
+![The text menu](screenshots/menu-text.png)
+![The command-line editor](screenshots/editor.png)
+
 - **Up/Down, Home/End** move the selection. **Enter** activates it. **1-9**
   boot that entry at once. Any key stops the countdown.
 - **e** edits the selected entry's command line before booting it: Left,
@@ -173,6 +187,17 @@ Booting the selected entry in 10 s. Press any key to stop.
   firmware's boot manager, which tries the next boot option.
 - With `timeout 0` there is no menu. To get it anyway, tap any key while the
   machine starts.
+- **Background picture:** with `background FILE.JPG` in BOOT.CFG the menu
+  is drawn in a panel on the right of that picture, which is scaled to
+  fill the screen (cropped evenly where its shape differs). The file is on
+  the ESP, relative paths under `\EFI\MYBOOT\` as for kernels. It must be
+  a baseline JPEG (what most cameras, phones and editors save), greyscale
+  or colour, up to 8192x8192 and 32 MiB; progressive JPEGs are refused, so
+  re-save one as baseline. The loader decodes it itself and draws through
+  the firmware's graphics output (GOP). If the picture is missing or
+  unusable, or there are errors to show, the plain text menu appears with
+  the reason. The command-line editor and the recovery screen are always
+  text.
 - **Recovery screen:** if every entry fails to load, the loader shows the
   errors and the same menu. You can retry an entry, edit its command line,
   open firmware setup, reboot or power off. After 10 s without a key it

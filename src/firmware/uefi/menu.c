@@ -17,6 +17,12 @@
  * returns to the firmware, so an unattended machine still moves on to its
  * next boot option.
  *
+ * With a background picture in BOOT.CFG (and GOP, and no errors to show)
+ * the normal menu is drawn over the picture in a panel on the right; the
+ * command-line editor and the recovery screen stay on the text console.
+ * The text menu is still written once underneath, so a serial console
+ * sees it.
+ *
  * Keys are polled (ReadKeyStroke never blocks) between short Stalls: no
  * events or timers. Output exists in every build configuration.
  */
@@ -31,6 +37,13 @@
 #define ATTR_NORMAL      EFI_LIGHTGRAY
 #define ATTR_TITLE       EFI_WHITE
 #define ATTR_SELECTED    EFI_BACKGROUND_LIGHTGRAY /* black on light grey */
+/* graphical menu colours, taken from the shipped background */
+#define GFX_TEXT         0xEDE3CF
+#define GFX_DIM          0x9C8F86
+#define GFX_ACCENT       0xE07A9A
+#define GFX_SEL_TEXT     0x1A1014
+#define GFX_BORDER       0x7A4256
+#define GFX_COLS         46 /* panel width in characters, if the screen allows */
 
 static EFI_GUID guid_global = {0x8BE4DF61, 0x93CA, 0x11D2, {0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C}};
 
@@ -58,6 +71,9 @@ struct menu {
     uint64_t left_us;
     uint64_t shown_secs;
     const char *message;   /* replaces the status line until the next key */
+    bool     gfx;          /* drawn over the background picture */
+    uint32_t gx, gy, gw;   /* panel position and width, pixels */
+    uint32_t gpad, glh;    /* panel's side padding, line height */
 };
 
 static char g_edit[CFG_CMDLINE_MAX + 1];
@@ -125,7 +141,7 @@ static const char *enter_fw_setup(void)
                                   EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
                                       EFI_VARIABLE_RUNTIME_ACCESS,
                                   sizeof(v), &v)))
-        return "The firmware refused the request to open its setup.";
+        return "The firmware refused to open its setup.";
     rt->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
     return "Reset failed.";
 }
@@ -150,39 +166,56 @@ static uint32_t item_row(const struct menu *m, uint32_t i)
     return m->top + i + (i >= m->cfg->nentries ? 1 : 0);
 }
 
-static void draw_item(const struct menu *m, uint32_t i)
+/* "1) Title" or "   Reboot" */
+static void item_text(const struct menu *m, uint32_t i, struct text *t)
 {
     const struct cfg_entry *e;
-    struct text t = {.n = 0};
 
     if (item_kind(m, i) == ITEM_ENTRY) {
         e = &m->cfg->entry[i];
-        t_str(&t, "  ");
-        t_num(&t, i + 1);
-        t_str(&t, ") ");
-        t_str(&t, e->title[0] ? e->title : e->kernel);
+        t_num(t, i + 1);
+        t_str(t, ") ");
+        t_str(t, e->title[0] ? e->title : e->kernel);
     } else {
-        t_str(&t, "     ");
-        t_str(&t, item_label[item_kind(m, i)]);
+        t_str(t, "   ");
+        t_str(t, item_label[item_kind(m, i)]);
     }
-    row_text(item_row(m, i), i == m->sel ? ATTR_SELECTED : ATTR_NORMAL, t.buf, m->cols - 1);
 }
 
-static void draw_status(struct menu *m)
+/* `brief`: for the graphical panel, narrower than a text screen */
+static void status_text(const struct menu *m, struct text *t, bool brief)
+{
+    if (m->message)
+        t_str(t, m->message);
+    else if (m->counting) {
+        t_str(t, m->recovery ? "Returning to the firmware in "
+                 : brief     ? "Booting in "
+                             : "Booting the selected entry in ");
+        t_num(t, m->shown_secs);
+        t_str(t, brief ? " s. Any key stops." : " s. Press any key to stop.");
+    }
+}
+
+/* ---- text console ---- */
+
+static void text_item(const struct menu *m, uint32_t i)
 {
     struct text t = {.n = 0};
 
-    if (m->message)
-        t_str(&t, m->message);
-    else if (m->counting) {
-        t_str(&t, m->recovery ? "Returning to the firmware in " : "Booting the selected entry in ");
-        t_num(&t, m->shown_secs);
-        t_str(&t, " s. Press any key to stop.");
-    }
+    t_str(&t, "  ");
+    item_text(m, i, &t);
+    row_text(item_row(m, i), i == m->sel ? ATTR_SELECTED : ATTR_NORMAL, t.buf, m->cols - 1);
+}
+
+static void text_status(struct menu *m)
+{
+    struct text t = {.n = 0};
+
+    status_text(m, &t, false);
     row_text(m->help_row + 2, ATTR_NORMAL, t.buf, m->cols - 1);
 }
 
-static void draw(struct menu *m)
+static void text_draw(struct menu *m)
 {
     uint32_t avail, nerr;
 
@@ -198,11 +231,114 @@ static void draw(struct menu *m)
     nerr = boot_errors_draw(2, avail, m->cols - 1);
     m->top = 2 + nerr + (nerr ? 1 : 0);
     for (uint32_t i = 0; i < m->nitems; i++)
-        draw_item(m, i);
+        text_item(m, i);
     m->help_row = item_row(m, m->nitems - 1) + 2;
     row_text(m->help_row, ATTR_NORMAL,
              "Up/Down select, Enter boot, e edit command line, 1-9 boot that entry", m->cols - 1);
-    draw_status(m);
+    text_status(m);
+}
+
+/* ---- over the background picture ---- */
+
+/* Panel lines: title, blank, entries, blank, built-in items, blank, two
+ * help lines, blank, status. */
+static uint32_t gfx_item_line(const struct menu *m, uint32_t i)
+{
+    return 2 + i + (i >= m->cfg->nentries ? 1 : 0);
+}
+
+static uint32_t gfx_y(const struct menu *m, uint32_t line)
+{
+    return m->gy + m->glh + line * m->glh; /* one line of padding on top */
+}
+
+static void gfx_line(const struct menu *m, uint32_t line, const char *s, uint32_t fg)
+{
+    gfx_text(m->gx + m->gpad, gfx_y(m, line), m->gw - 2 * m->gpad, 0, s, fg, GFX_NONE);
+}
+
+/* Place the panel on the right, where the shipped picture is dark, and
+ * darken the picture under it. False if the screen is too small. */
+static bool gfx_layout(struct menu *m)
+{
+    uint32_t w, h, scale, cw, margin, cols = GFX_COLS, lines, gh;
+
+    gfx_geometry(&w, &h, &scale);
+    cw = 8 * scale;
+    m->glh = GFX_LINE(scale);
+    m->gpad = 2 * cw;
+    margin = w / 16;
+    if (cols * cw + 2 * m->gpad + 2 * margin > w)
+        cols = w > 2 * margin + 2 * m->gpad ? (w - 2 * margin - 2 * m->gpad) / cw : 0;
+    lines = gfx_item_line(m, m->nitems - 1) + 6;
+    gh = (lines + 2) * m->glh;
+    if (cols < 30 || gh + 2 * m->glh > h)
+        return false;
+    m->gw = cols * cw + 2 * m->gpad;
+    m->gx = w - margin - m->gw;
+    m->gy = (h - gh) / 2;
+    gfx_panel(m->gx, m->gy, m->gw, gh, GFX_BORDER);
+    return true;
+}
+
+static void gfx_item(const struct menu *m, uint32_t i)
+{
+    struct text t = {.n = 0};
+    bool sel = i == m->sel;
+
+    item_text(m, i, &t);
+    /* the bar reaches halfway into the padding */
+    gfx_text(m->gx + m->gpad / 2, gfx_y(m, gfx_item_line(m, i)), m->gw - m->gpad, m->gpad / 2,
+             t.buf, sel ? GFX_SEL_TEXT : GFX_TEXT, sel ? GFX_ACCENT : GFX_NONE);
+}
+
+static void gfx_status(const struct menu *m)
+{
+    struct text t = {.n = 0};
+
+    status_text(m, &t, true);
+    gfx_line(m, gfx_item_line(m, m->nitems - 1) + 5, t.buf, m->message ? GFX_ACCENT : GFX_DIM);
+}
+
+static void gfx_draw(const struct menu *m)
+{
+    uint32_t help = gfx_item_line(m, m->nitems - 1) + 2;
+
+    gfx_show();
+    gfx_line(m, 0, "MYBOOT", GFX_ACCENT);
+    for (uint32_t i = 0; i < m->nitems; i++)
+        gfx_item(m, i);
+    gfx_line(m, help, "Up/Down select   Enter boot", GFX_DIM);
+    gfx_line(m, help + 1, "e edit command line   1-9 boot that entry", GFX_DIM);
+    gfx_status(m);
+}
+
+/* ---- either ---- */
+
+static void draw_item(const struct menu *m, uint32_t i)
+{
+    if (m->gfx)
+        gfx_item(m, i);
+    else
+        text_item(m, i);
+}
+
+static void draw_status(struct menu *m)
+{
+    if (m->gfx)
+        gfx_status(m);
+    else
+        text_status(m);
+}
+
+/* The text menu is drawn in both modes: OVMF and many firmwares copy the
+ * console to a serial port, which then shows the menu too. The picture
+ * covers it at once. */
+static void draw(struct menu *m)
+{
+    text_draw(m);
+    if (m->gfx)
+        gfx_draw(m);
 }
 
 /* ---- input ------------------------------------------------------------ */
@@ -310,13 +446,20 @@ static void run(struct menu *m, struct menu_choice *out)
     /* The firmware watchdog would reset the machine while a person reads
      * the menu; re-armed with its default once a choice is made. */
     g_uefi.bs->SetWatchdogTimer(0, 0, 0, NULL);
-    con_log_pause(1); /* screen drawing is not log */
     if (fw_setup_supported())
         m->special[m->nspecial++] = ITEM_FW_SETUP;
     m->special[m->nspecial++] = ITEM_REBOOT;
     m->special[m->nspecial++] = ITEM_POWEROFF;
     m->special[m->nspecial++] = ITEM_RETURN;
     m->nitems = m->cfg->nentries + m->nspecial;
+    /* Loading the picture is logged; errors (its own included) need the
+     * text menu, which lists them. */
+    m->gfx = !m->recovery && m->cfg->background && gfx_open(m->cfg->background);
+    if (m->gfx && (boot_errors_count() || !gfx_layout(m))) {
+        gfx_close();
+        m->gfx = false;
+    }
+    con_log_pause(1); /* screen drawing is not log */
     con_size(&m->cols, &m->rows);
     m->shown_secs = (m->left_us + 999999) / 1000000;
     draw(m);
@@ -375,6 +518,8 @@ static void run(struct menu *m, struct menu_choice *out)
         draw_status(m);
     }
 
+    if (m->gfx)
+        gfx_close();
     con_attr(ATTR_NORMAL);
     con_clear();
     con_cursor(1);

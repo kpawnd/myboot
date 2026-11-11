@@ -332,12 +332,27 @@ typedef struct {
     UINTN                                 FrameBufferSize;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
 
-typedef struct {
+/* Blt pixels are always blue, green, red, reserved in memory: 0x00RRGGBB
+ * as a little-endian uint32_t, whatever the framebuffer's own format. */
+typedef uint32_t EFI_GRAPHICS_OUTPUT_BLT_PIXEL;
+enum {
+    EfiBltVideoFill,
+    EfiBltVideoToBltBuffer,
+    EfiBltBufferToVideo,
+    EfiBltVideoToVideo
+};
+
+typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL EFI_GRAPHICS_OUTPUT_PROTOCOL;
+struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
     void                              *QueryMode;
     void                              *SetMode;
-    void                              *Blt;
+    /* Delta: bytes per row of BltBuffer; 0 means Width * 4. */
+    EFI_STATUS (EFIAPI *Blt)(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
+                             EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer, uint32_t BltOperation,
+                             UINTN SourceX, UINTN SourceY, UINTN DestinationX,
+                             UINTN DestinationY, UINTN Width, UINTN Height, UINTN Delta);
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
-} EFI_GRAPHICS_OUTPUT_PROTOCOL;
+};
 
 /* 13.9 EFI_BLOCK_IO_PROTOCOL (only the fields we read) */
 typedef struct {
@@ -443,6 +458,7 @@ _Static_assert(offsetof(EFI_FILE_PROTOCOL, Read) == 32, "File.Read");
 _Static_assert(offsetof(EFI_FILE_PROTOCOL, SetPosition) == 56, "File.SetPosition");
 _Static_assert(sizeof(EFI_GRAPHICS_OUTPUT_MODE_INFORMATION) == 36, "GOP mode info size");
 _Static_assert(offsetof(EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE, FrameBufferBase) == 24, "GOP.FrameBufferBase");
+_Static_assert(offsetof(EFI_GRAPHICS_OUTPUT_PROTOCOL, Blt) == 16, "GOP.Blt");
 _Static_assert(offsetof(EFI_GRAPHICS_OUTPUT_PROTOCOL, Mode) == 24, "GOP.Mode");
 _Static_assert(offsetof(EFI_BLOCK_IO_MEDIA, BlockSize) == 12, "Media.BlockSize");
 _Static_assert(offsetof(EFI_BLOCK_IO_MEDIA, LastBlock) == 24, "Media.LastBlock");

@@ -216,6 +216,12 @@ void cfg_parse(char *text, size_t len, struct boot_config *c)
             cur = &c->entry[nraw];
             cur->title = val;
             entry_line[nraw++] = line;
+        } else if (str_eq(key, "background")) {
+            const char *err = c->background ? "second background line" : check_path(val);
+            if (err)
+                add_error(c, line, err);
+            else
+                c->background = val;
         } else if (str_eq(key, "auto_windows")) {
             if (str_eq(val, "yes") || str_eq(val, "no"))
                 c->auto_windows = val[0] == 'y';

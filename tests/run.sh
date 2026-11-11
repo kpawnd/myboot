@@ -190,7 +190,9 @@ echo "MYBOOT scenarios, $CONFIG build"
 d=$(esp shipped)
 sed 's/^timeout .*/timeout 1/' kernel/boot.cfg > "$d/BOOT.CFG"
 cp "$MODULE" "$d/SELFTEST.MOD"
+cp kernel/background.jpg "$d/BACKGROUND.JPG"
 expect_boot shipped "MYBOOT boot menu" "boot entry     : 1 (Test kernel with self-test module)" \
+    "Loaded menu background \\EFI\\MYBOOT\\BACKGROUND.JPG (" \
     "selftest at" "Booting 'Test kernel with self-test module'" \
     "Loaded kernel \\EFI\\MYBOOT\\KERNEL.ELF (" \
     "Loaded module \\EFI\\MYBOOT\\SELFTEST.MOD (170 bytes)" \
@@ -297,6 +299,33 @@ d=$(esp menu-edit)
 two_entries "$d"
 KEYS='e backspace 0 spc e d i t e d ret' expect_boot menu-edit \
     "cmdline        : modules=0 edited" "boot entry     : 1 (first)"
+
+# The menu over a background picture: move, open the editor and leave it
+# (the picture is drawn again), boot the selection.
+d=$(esp menu-background)
+two_entries "$d"
+echo "background BG.JPG" >> "$d/BOOT.CFG"
+cp kernel/background.jpg "$d/BG.JPG"
+KEYS='down e esc ret' expect_boot menu-background \
+    "Loaded menu background \\EFI\\MYBOOT\\BG.JPG (" "boot entry     : 2 (second)"
+
+# A background that cannot be used is reported, the text menu lists it,
+# and the boot goes on.
+bad_background() {
+    printf 'timeout 1\nbackground BG.JPG\nentry good\nkernel KERNEL.ELF\ncmdline modules=0\n' \
+        > "$1/BOOT.CFG"
+}
+
+d=$(esp background-missing)
+bad_background "$d"
+expect_boot background-missing "MYBOOT boot menu" \
+    "cannot open the menu background: \\EFI\\MYBOOT\\BG.JPG" "boot entry     : 1 (good)"
+
+d=$(esp background-not-jpeg)
+bad_background "$d"
+cp "$MODULE" "$d/BG.JPG"
+expect_boot background-not-jpeg "MYBOOT boot menu" \
+    "cannot use the menu background: not a JPEG file" "boot entry     : 1 (good)"
 
 # Recovery screen: every entry fails; Up twice from the first entry wraps
 # to "Power off" (above "Return to firmware"), which must shut QEMU down.

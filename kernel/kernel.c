@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include "bootinfo/bootinfo.h"
 #include "arch/x86_64/cpu.h"
-#include "font8x8.h"
+#include "lib/font8x8.h"
 
 #define COM1          0x3F8
 #define QEMU_EXIT     0xF4

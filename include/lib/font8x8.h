@@ -1,7 +1,7 @@
 /* Vendored from https://github.com/dhepper/font8x8 (font8x8_basic.h), unmodified glyph data.
  * Bit 0 of each byte is the leftmost pixel; row 0 is the top. */
-#ifndef KERNEL_FONT8X8_H
-#define KERNEL_FONT8X8_H
+#ifndef LIB_FONT8X8_H
+#define LIB_FONT8X8_H
 #include <stdint.h>
 /**
  * 8x8 monochrome bitmap fonts for rendering

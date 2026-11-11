@@ -8,6 +8,9 @@
  *   default 2                 1-based entry to boot (default 1)
  *   auto_windows no           do not add a Windows Boot Manager entry found
  *                             on any partition (default: yes)
+ *   background BG.JPG         draw the menu over this picture, on the boot
+ *                             volume: a baseline JPEG, scaled to cover the
+ *                             screen (default: the plain text menu)
  *   entry Debug kernel        starts an entry; the rest of the line is its title
  *
  * Each entry has exactly one of:
@@ -88,6 +91,7 @@ struct boot_config {
     uint32_t timeout;       /* seconds; 0 = boot the default without a menu */
     uint32_t default_entry; /* 0-based, always < nentries when nentries > 0 */
     uint32_t auto_windows;  /* 1: add a Windows Boot Manager entry if found */
+    const char *background; /* menu picture; NULL if none */
     uint32_t nentries;      /* entries that have an image */
     struct cfg_entry entry[CFG_MAX_ENTRIES];
     uint32_t nerrors;       /* total; only the first CFG_MAX_ERRORS are kept */
