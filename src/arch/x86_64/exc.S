@@ -1,8 +1,4 @@
-/*
- * Exception stubs for the loader's IDT after ExitBootServices, when the
- * firmware's handlers are gone. Vector i's stub is at exc_stubs + 16 * i;
- * it calls exc_report(i) (MS x64 ABI), which never returns.
- */
+/* Exception stubs for the loader's IDT after ExitBootServices, when the firmware's handlers are gone. */
     .text
     .globl exc_stubs
     .p2align 4

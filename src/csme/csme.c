@@ -1,21 +1,4 @@
-/*
- * Intel CSME detection. Layouts follow Linux drivers/misc/mei/hw-me-regs.h
- * and hw-me.c (HECI registers, device IDs), hbm.h and hw.h (the HECI bus
- * messages), bus-fixup.c (client UUIDs, the MKHI version reply), and
- * coreboot's soc/intel/common/block/include/intelblocks/cse.h (HFSTS1
- * fields).
- *
- * csme_probe only reads configuration space. csme_query_version and
- * csme_hbm_session write to the device, and they are careful:
- *   - they ask only when HFSTS1 says the CSME is up in normal mode, and only
- *     through a memory BAR the firmware assigned (they never assign one);
- *   - they use the link only if the firmware's HECI driver left both sides
- *     ready and both buffers empty, and they never reset the link;
- *   - if memory decoding was off, they turn it on for the exchange and put
- *     the Command register back afterwards, whatever happened.
- * The HBM session ends with HOST_STOP, and Linux's mei_me driver resets the
- * link when it probes, so the kernel sees nothing of either.
- */
+/* Intel CSME detection. */
 #include <stdbool.h>
 #include "csme/csme.h"
 #include "lib/mem.h"
@@ -27,10 +10,8 @@
 #define PCI_BAR0_HI    0x14
 #define PCI_CMD_MEMORY 0x0002
 #define VENDOR_INTEL   0x8086
-#define CLASS_HECI     0x0780 /* communication controller, other */
+#define CLASS_HECI     0x0780
 
-/* HFSTS1. Bit 4 is left alone: manufacturing mode on older CSMEs, SPI
- * protection mode (the opposite sense) on newer ones. */
 #define HFS1_STATE(v)  ((v) & 0xF)
 #define HFS1_INIT_DONE (1u << 9)
 #define HFS1_ERROR(v)  (((v) >> 12) & 0xF)
@@ -38,35 +19,30 @@
 #define STATE_NORMAL   5
 #define MODE_NORMAL    0
 
-/* HECI registers, offsets into BAR0. Both CSRs have the same layout. */
-#define H_CB_WW        0x00      /* host circular buffer: write window */
+#define H_CB_WW        0x00
 #define H_CSR          0x04
-#define ME_CB_RW       0x08      /* ME circular buffer: read window */
+#define ME_CB_RW       0x08
 #define ME_CSR_HA      0x0C
-#define CSR_IS         (1u << 1) /* interrupt status, write 1 to clear */
-#define CSR_IG         (1u << 2) /* interrupt generate: buffer written or read */
+#define CSR_IS         (1u << 1)
+#define CSR_IG         (1u << 2)
 #define CSR_RDY        (1u << 3)
 #define CSR_RST        (1u << 4)
 #define CSR_RP(v)      (((v) >> 8) & 0xFF)
 #define CSR_WP(v)      (((v) >> 16) & 0xFF)
 #define CSR_DEPTH(v)   ((v) >> 24)
 
-/* HECI message header */
 #define HDR_ME_ADDR(v)   ((v) & 0xFF)
 #define HDR_HOST_ADDR(v) (((v) >> 8) & 0xFF)
 #define HDR_LEN(v)       (((v) >> 16) & 0x1FF)
 #define HDR_COMPLETE     (1u << 31)
 
-/* MKHI */
-#define MKHI_ADDR       0x07 /* its fixed address, the way firmware talks to it */
+#define MKHI_ADDR       0x07
 #define MKHI_GROUP_GEN  0xFF
 #define MKHI_GET_FW_VER 0x02
 #define MKHI_RESPONSE   0x80
-#define REPLY_MIN       12 /* MKHI header + the code version block */
-#define REPLY_MAX_DW    16 /* kept; longer replies are read and dropped */
+#define REPLY_MIN       12
+#define REPLY_MAX_DW    16
 
-/* HECI bus messages: ME address 0, host address 0. Byte 0 is the command;
- * a response is the request's command | 0x80. */
 #define HBM_START       0x01
 #define HBM_STOP        0x02
 #define HBM_ENUM        0x04
@@ -77,14 +53,14 @@
 #define HBM_RES         0x80
 #define HBM_MAJOR       2
 #define HBM_MINOR       0
-#define HBM_ENUM_LEN    36 /* header + a 256-bit map of valid ME addresses */
-#define HBM_PROPS_LEN   28 /* header + mei_client_properties */
+#define HBM_ENUM_LEN    36
+#define HBM_PROPS_LEN   28
 #define HBM_FLOW_LEN    8
-#define HOST_CLIENT     1  /* the one host address the loader uses */
-#define MAX_SKIP        8  /* unrelated messages tolerated while waiting */
+#define HOST_CLIENT     1
+#define MAX_SKIP        8
 
 #define TIMEOUT_US 1000000
-#define DRAIN_US   20000 /* for the optional HOST_STOP answer */
+#define DRAIN_US   20000
 #define POLL_US    50
 
 static const uint16_t hfsts_off[6] = {0x40, 0x48, 0x60, 0x64, 0x68, 0x6C};
@@ -111,20 +87,17 @@ void csme_probe(const struct csme_ops *ops, struct boot_csme *out)
     out->op_mode = (uint8_t)HFS1_MODE(h1);
 }
 
-/* ---- the HECI link -------------------------------------------------------- */
-
 struct heci {
     const struct csme_ops *ops;
     uint64_t bar;
-    uint16_t cmd;       /* Command register as found */
-    uint32_t waited_us; /* one budget for the whole call */
-    int      credit;    /* ME address whose flow-control grant arrived early, -1 none */
+    uint16_t cmd;
+    uint32_t waited_us;
+    int      credit;
 };
 
 static uint32_t rd(struct heci *h, uint32_t reg) { return h->ops->mmio_read32(h->bar + reg); }
 static void wr(struct heci *h, uint32_t reg, uint32_t v) { h->ops->mmio_write32(h->bar + reg, v); }
 
-/* Spend one poll interval; false once the budget is gone. */
 static bool tick(struct heci *h)
 {
     if (h->waited_us >= TIMEOUT_US)
@@ -134,7 +107,6 @@ static bool tick(struct heci *h)
     return true;
 }
 
-/* Slots written and not yet read; -1 when the pointers cannot be right. */
 static int filled(uint32_t csr)
 {
     uint32_t n = (uint8_t)(CSR_WP(csr) - CSR_RP(csr));
@@ -143,16 +115,11 @@ static int filled(uint32_t csr)
 
 static bool up(uint32_t csr) { return (csr & CSR_RDY) && !(csr & CSR_RST); }
 
-/* Tell the ME the host buffer was written, or the ME buffer read. IS is
- * write-1-to-clear: it is masked so pending status stays pending (as in
- * Linux's mei_hcsr_set). */
 static void host_signal(struct heci *h)
 {
     wr(h, H_CSR, (rd(h, H_CSR) & ~CSR_IS) | CSR_IG);
 }
 
-/* Map BAR0 and turn memory decoding on; anything but OK leaves the device
- * untouched. */
 static uint8_t heci_open(struct heci *h, const struct csme_ops *ops, const struct boot_csme *out)
 {
     uint32_t bar;
@@ -164,10 +131,10 @@ static uint8_t heci_open(struct heci *h, const struct csme_ops *ops, const struc
         !(out->flags & BOOT_CSME_INIT_COMPLETE))
         return BOOT_CSME_ST_NOT_NORMAL;
     bar = ops->cfg_read32(PCI_BAR0);
-    if ((bar & 1) || bar == 0xFFFFFFFF) /* I/O BAR, or the device vanished */
+    if ((bar & 1) || bar == 0xFFFFFFFF)
         return BOOT_CSME_ST_NO_BAR;
     h->bar = bar & ~0xFull;
-    if (((bar >> 1) & 3) == 2) /* 64-bit BAR */
+    if (((bar >> 1) & 3) == 2)
         h->bar |= (uint64_t)ops->cfg_read32(PCI_BAR0_HI) << 32;
     if (!h->bar)
         return BOOT_CSME_ST_NO_BAR;
@@ -183,7 +150,6 @@ static void heci_close(struct heci *h)
         h->ops->cfg_write16(PCI_COMMAND, h->cmd);
 }
 
-/* Both sides ready and both buffers empty: the firmware left the link idle. */
 static uint8_t link_idle(struct heci *h)
 {
     uint32_t hcsr = rd(h, H_CSR), mcsr = rd(h, ME_CSR_HA);
@@ -212,7 +178,6 @@ static uint8_t wait_filled(struct heci *h, uint32_t n)
     }
 }
 
-/* One message: waits until the ME has taken the previous one. */
 static uint8_t heci_send(struct heci *h, uint8_t me, uint8_t host, const uint32_t *d, uint32_t len)
 {
     uint32_t n = (len + 3) / 4, csr;
@@ -235,8 +200,6 @@ static uint8_t heci_send(struct heci *h, uint8_t me, uint8_t host, const uint32_
     return BOOT_CSME_ST_OK;
 }
 
-/* One message from the ME: its header, and the first REPLY_MAX_DW dwords
- * of its body in d (zero-padded; the rest is read and dropped). */
 static uint8_t heci_recv(struct heci *h, uint32_t *hdr, uint32_t d[REPLY_MAX_DW])
 {
     uint32_t n;
@@ -247,7 +210,7 @@ static uint8_t heci_recv(struct heci *h, uint32_t *hdr, uint32_t d[REPLY_MAX_DW]
         return st;
     *hdr = rd(h, ME_CB_RW);
     n = (HDR_LEN(*hdr) + 3) / 4;
-    if (n + 1 > CSR_DEPTH(rd(h, ME_CSR_HA))) /* header + body could never arrive in one piece */
+    if (n + 1 > CSR_DEPTH(rd(h, ME_CSR_HA)))
         return BOOT_CSME_ST_BAD_REPLY;
     if ((st = wait_filled(h, n)) != BOOT_CSME_ST_OK)
         return st;
@@ -260,9 +223,6 @@ static uint8_t heci_recv(struct heci *h, uint32_t *hdr, uint32_t d[REPLY_MAX_DW]
     return (*hdr & HDR_COMPLETE) ? BOOT_CSME_ST_OK : BOOT_CSME_ST_BAD_REPLY;
 }
 
-/* The next message from `me` to `host` (for HBM, also with command `cmd`),
- * skipping up to MAX_SKIP others. A flow-control grant skipped on the way
- * is remembered in h->credit. */
 static uint8_t recv_for(struct heci *h, uint8_t me, uint8_t host, int cmd, uint32_t d[REPLY_MAX_DW],
                         uint32_t *len)
 {
@@ -284,7 +244,6 @@ static uint8_t recv_for(struct heci *h, uint8_t me, uint8_t host, int cmd, uint3
     return BOOT_CSME_ST_BAD_REPLY;
 }
 
-/* Check an MKHI GET_FW_VERSION reply in d; fill fw_* if `out` has none yet. */
 static uint8_t parse_fw_ver(const uint32_t *d, uint32_t len, struct boot_csme *out)
 {
     if (len < REPLY_MIN || (d[0] & 0xFF) != MKHI_GROUP_GEN ||
@@ -294,8 +253,6 @@ static uint8_t parse_fw_ver(const uint32_t *d, uint32_t len, struct boot_csme *o
         return BOOT_CSME_ST_REFUSED;
     if (out->flags & BOOT_CSME_VERSION_VALID)
         return BOOT_CSME_ST_OK;
-    /* Code version block: u16 minor, u8 major, u8 platform, u16 build,
-     * u16 hotfix. Recovery and FITC version blocks follow; unused. */
     out->fw_minor = (uint16_t)d[1];
     out->fw_major = (uint8_t)(d[1] >> 16);
     out->fw_build = (uint16_t)d[2];
@@ -303,8 +260,6 @@ static uint8_t parse_fw_ver(const uint32_t *d, uint32_t len, struct boot_csme *o
     out->flags |= BOOT_CSME_VERSION_VALID;
     return BOOT_CSME_ST_OK;
 }
-
-/* ---- the version query at MKHI's fixed address ---------------------------- */
 
 static uint8_t fixed_exchange(struct heci *h, struct boot_csme *out)
 {
@@ -331,10 +286,6 @@ void csme_query_version(const struct csme_ops *ops, struct boot_csme *out)
     heci_close(&h);
 }
 
-/* ---- the HBM session ------------------------------------------------------ */
-
-/* One HBM request (len bytes of req) and its response, at least min_len
- * bytes, into d. */
 static uint8_t hbm(struct heci *h, const uint32_t *req, uint32_t len, uint32_t *d, uint32_t min_len)
 {
     uint32_t got;
@@ -346,15 +297,11 @@ static uint8_t hbm(struct heci *h, const uint32_t *req, uint32_t len, uint32_t *
     return got < min_len ? BOOT_CSME_ST_BAD_REPLY : BOOT_CSME_ST_OK;
 }
 
-/* {cmd, me_addr, host_addr, 0}: the shape of most HBM requests */
 static uint32_t hbm_req(uint8_t cmd, uint8_t me, uint8_t host)
 {
     return cmd | ((uint32_t)me << 8) | ((uint32_t)host << 16);
 }
 
-/* GET_FW_VERSION to the MKHI client, the way Linux's bus-fixup asks:
- * a fixed-address client is used directly, any other is connected to,
- * given a flow-control credit, and waited on for one. */
 static uint8_t client_version(struct heci *h, const struct csme_client *c, struct boot_csme *out)
 {
     uint32_t mkhi = MKHI_GROUP_GEN | (MKHI_GET_FW_VER << 8), d[REPLY_MAX_DW], req[2], len;
@@ -390,9 +337,6 @@ disconnect:
     return st != BOOT_CSME_ST_OK ? st : st2;
 }
 
-/* Not every CSME answers HOST_STOP (Arrow Lake's does not), and Linux does
- * not wait for it. Give the answer DRAIN_US to arrive, reading whatever
- * comes so the ME buffer is left empty; silence is not a failure. */
 static void drain_stop(struct heci *h)
 {
     uint32_t hdr, d[REPLY_MAX_DW];
@@ -404,7 +348,6 @@ static void drain_stop(struct heci *h)
             break;
 }
 
-/* MKHI as Linux finds it: the "MKHIF fix" client, 55213584-9a29-4916-badf-0fb7ed682aeb */
 static const uint8_t uuid_mkhi_fix[16] = {0x84, 0x35, 0x21, 0x55, 0x29, 0x9a, 0x16, 0x49,
                                           0xba, 0xdf, 0x0f, 0xb7, 0xed, 0x68, 0x2a, 0xeb};
 
@@ -417,9 +360,6 @@ static uint8_t session(struct heci *h, struct boot_csme *out, struct csme_client
 
     if ((st = link_idle(h)) != BOOT_CSME_ST_OK || (st = hbm(h, &req, 4, d, 4)) != BOOT_CSME_ST_OK)
         return st;
-    /* {cmd, me_max_version minor, major, host_version_supported}. When
-     * unsupported the ME speaks its own, lower version; 1.0 has all this
-     * session needs. */
     cl->hbm_minor = (uint8_t)(d[0] >> 8);
     cl->hbm_major = (uint8_t)(d[0] >> 16);
     if (!(d[0] >> 24) && cl->hbm_major < 1) {
@@ -443,14 +383,12 @@ static uint8_t session(struct heci *h, struct boot_csme *out, struct csme_client
             st = BOOT_CSME_ST_BAD_REPLY;
             goto stop;
         }
-        if ((d[0] >> 16) & 0xFF) /* status: the client went away */
+        if ((d[0] >> 16) & 0xFF)
             continue;
         if (out->client_count < 255)
             out->client_count++;
         if (cl->count == CSME_MAX_CLIENTS)
             continue;
-        /* {cmd, me_addr, status, reserved}, then uuid[16], protocol_version,
-         * max_number_of_connections, fixed_address, flags, max_msg_length */
         memcpy(c->uuid, &d[1], 16);
         c->addr = (uint8_t)a;
         c->protocol_version = (uint8_t)d[5];
@@ -464,11 +402,11 @@ static uint8_t session(struct heci *h, struct boot_csme *out, struct csme_client
 
     out->mkhi_status = mkhi ? client_version(h, mkhi, out) : BOOT_CSME_ST_NONE;
     if (out->mkhi_status == BOOT_CSME_ST_TIMEOUT || out->mkhi_status == BOOT_CSME_ST_NOT_READY)
-        return BOOT_CSME_ST_OK; /* the link is gone or wedged; HOST_STOP would not get through */
+        return BOOT_CSME_ST_OK;
 stop:
     if (st == BOOT_CSME_ST_TIMEOUT || st == BOOT_CSME_ST_NOT_READY)
         return st;
-    req = hbm_req(HBM_STOP, 0, 0); /* reason 0: driver stop request */
+    req = hbm_req(HBM_STOP, 0, 0);
     if ((st2 = heci_send(h, 0, 0, &req, 4)) == BOOT_CSME_ST_OK)
         drain_stop(h);
     return st != BOOT_CSME_ST_OK ? st : st2;
@@ -487,9 +425,6 @@ void csme_hbm_session(const struct csme_ops *ops, struct boot_csme *out, struct 
     heci_close(&h);
 }
 
-/* ---- names ---------------------------------------------------------------- */
-
-/* HECI1 device IDs from Linux hw-me-regs.h, by chipset. */
 static const struct { uint16_t id; const char *name; } platforms[] = {
     {0x9D3A, "Sunrise Point-LP"}, {0xA13A, "Sunrise Point-H"},  {0xA2BA, "Union Point"},
     {0x9DE0, "Cannon Point-LP"},  {0xA360, "Cannon Point-H"},   {0x02E0, "Comet Lake-LP"},
@@ -545,8 +480,6 @@ const char *csme_status_name(uint8_t s)
     return s < sizeof(names) / sizeof(names[0]) ? names[s] : NULL;
 }
 
-/* ME client UUIDs from Linux bus-fixup.c and the mei client drivers,
- * fields as in uuid_le: three little-endian, then eight bytes. */
 static const struct { uint32_t a; uint16_t b, c; uint8_t d[8]; const char *name; } clients[] = {
     {0x55213584, 0x9a29, 0x4916, {0xba, 0xdf, 0x0f, 0xb7, 0xed, 0x68, 0x2a, 0xeb}, "MKHI (fixed)"},
     {0x8e6a6715, 0x9abc, 0x4043, {0x88, 0xef, 0x9e, 0x39, 0xc6, 0xf6, 0x3e, 0x0f}, "MKHI"},

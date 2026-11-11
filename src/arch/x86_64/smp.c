@@ -1,29 +1,14 @@
-/*
- * Application processor startup. See include/arch/x86_64/smp.h.
- *
- * The sequence is the SDM's own (vol. 3A 9.4.4.1, "Typical BSP
- * initialization sequence"): INIT to all processors excluding self, a wait
- * (10 ms, or 10 us where Linux skips it), start-up IPI (SIPI) to all excluding self, 200 us, SIPI again. Using the
- * "all excluding self" shorthand means no IPI ever names a destination, so
- * none can reach the CPU running this whatever IDs the MADT holds; an INIT
- * to itself would stop the boot for good. There is no INIT de-assert: the
- * SDM drops it for every CPU since the Pentium 4, and where it still acts
- * it goes to every processor, this one included.
- *
- * A CPU missing from the list (disabled in the MADT) wakes too, finds no
- * entry and halts. All APs run the trampoline at once, which works because
- * it never writes to its own page: each writes only its own entry.
- */
+/* Application processor startup. */
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/cpu.h"
 #include "lib/mem.h"
 
-#define MADT_ENTRIES    44 /* SDT header + local APIC address + flags */
+#define MADT_ENTRIES    44
 #define MADT_LAPIC      0
 #define MADT_X2APIC     9
 #define MADT_ENABLED    (1u << 0)
 
-#define APIC_BASE_EXTD  (1ull << 10) /* x2APIC mode */
+#define APIC_BASE_EXTD  (1ull << 10)
 #define APIC_BASE_EN    (1ull << 11)
 #define APIC_BASE_ADDR  0x000FFFFFFFFFF000ull
 #define XAPIC_ID        0x020
@@ -32,42 +17,39 @@
 #define X2APIC_ID       0x802u
 #define X2APIC_ICR      0x830u
 #define ICR_PENDING     (1u << 12)
-#define ICR_ALL_BUT_SELF  (3u << 18) /* destination shorthand */
-#define ICR_INIT          0x00004500u /* INIT, level assert */
-#define ICR_SIPI          0x00004600u /* start-up; vector = page >> 12 */
+#define ICR_ALL_BUT_SELF  (3u << 18)
+#define ICR_INIT          0x00004500u
+#define ICR_SIPI          0x00004600u
 
 #define SIPI_DELAY_US   200
 #define PARK_WAIT_US    100000
 
-/* smp_tramp.S */
 extern const uint8_t smp_tramp_start[], smp_tramp_end[], smp_tramp_lm64[], smp_tramp_pm32[];
 
-/* The trampoline's data block, at offset 8 of its page; smp_tramp.S
- * addresses it with these same offsets (D_*). */
 struct __attribute__((packed)) tramp_data {
-    uint16_t gdt32_limit;  /* 8 */
-    uint32_t gdt32_base;   /* 10 */
-    uint16_t stop;         /* 14: smp_tramp_params.stop */
-    uint32_t far32_off;    /* 16: protected-mode entry, linear */
+    uint16_t gdt32_limit;
+    uint32_t gdt32_base;
+    uint16_t stop;
+    uint32_t far32_off;
     uint16_t far32_sel;
     uint16_t pad1;
-    uint32_t far64_off;    /* 24: long-mode entry, linear */
+    uint32_t far64_off;
     uint16_t far64_sel;
     uint16_t pad2;
-    uint64_t cr3;          /* 32 */
-    uint64_t cr4;          /* 40 */
-    uint64_t cr0;          /* 48 */
-    uint64_t efer_set;     /* 56 */
-    uint64_t pat;          /* 64 */
-    uint64_t xcr0;         /* 72 */
-    uint16_t gdt64_limit;  /* 80 */
-    uint64_t gdt64_base;   /* 82 */
-    uint16_t seen[3];      /* 90: APs that reached 16-, 32-, 64-bit code */
-    uint64_t cpus;         /* 96 */
-    uint64_t ncpus;        /* 104 */
+    uint64_t cr3;
+    uint64_t cr4;
+    uint64_t cr0;
+    uint64_t efer_set;
+    uint64_t pat;
+    uint64_t xcr0;
+    uint16_t gdt64_limit;
+    uint64_t gdt64_base;
+    uint16_t seen[3];
+    uint64_t cpus;
+    uint64_t ncpus;
 };
 #define TRAMP_DATA  8
-#define TRAMP_GDT32 112 /* four descriptors, after the data */
+#define TRAMP_GDT32 112
 _Static_assert(offsetof(struct tramp_data, cr3) == 32 - TRAMP_DATA, "tramp_data.cr3");
 _Static_assert(offsetof(struct tramp_data, gdt64_limit) == 80 - TRAMP_DATA, "tramp_data.gdt64");
 _Static_assert(offsetof(struct tramp_data, ncpus) == 104 - TRAMP_DATA, "tramp_data.ncpus");
@@ -91,7 +73,6 @@ uint32_t smp_parse_madt(const uint8_t *madt, uint32_t len, uint32_t bsp_apic_id,
     uint32_t n = 0;
     bool bsp_seen = false;
 
-    /* Slot 0 is the BSP's, filled in when its entry turns up. */
     if (cap)
         out[0] = (struct smp_madt_cpu){bsp_apic_id, 0};
     n = 1;
@@ -106,7 +87,7 @@ uint32_t smp_parse_madt(const uint8_t *madt, uint32_t len, uint32_t bsp_apic_id,
             uid = e[2];
             id = e[3];
             flags = rd32le(e + 4);
-            if (id == 0xFF) /* the broadcast ID: never a CPU */
+            if (id == 0xFF)
                 continue;
         } else if (e[0] == MADT_X2APIC && e[1] >= 16) {
             id = rd32le(e + 4);
@@ -115,7 +96,6 @@ uint32_t smp_parse_madt(const uint8_t *madt, uint32_t len, uint32_t bsp_apic_id,
         } else {
             continue;
         }
-        /* Online-capable but not enabled means hot-pluggable: absent now. */
         if (!(flags & MADT_ENABLED))
             continue;
         if (id == bsp_apic_id) {
@@ -167,8 +147,6 @@ void smp_tramp_seen(uint64_t page, uint32_t seen[3])
         seen[i] = d->seen[i];
 }
 
-/* ---- after ExitBootServices ----------------------------------------------- */
-
 static void delay_us(uint64_t us, uint64_t tsc_hz)
 {
     uint64_t t0 = rdtsc(), ticks = us * (tsc_hz / 1000000);
@@ -187,15 +165,12 @@ static uint32_t lapic_id(const struct lapic *l)
     return l->x2apic ? (uint32_t)rdmsr(X2APIC_ID) : l->mmio[XAPIC_ID / 4] >> 24;
 }
 
-/* Wait (briefly) until the xAPIC has sent the last IPI; x2APIC has no
- * delivery status to wait on. */
 static void icr_idle(const struct lapic *l, uint64_t tsc_hz)
 {
     for (int i = 0; !l->x2apic && i < 1000 && (l->mmio[XAPIC_ICR_LO / 4] & ICR_PENDING); i++)
         delay_us(1, tsc_hz);
 }
 
-/* To every processor but this one: no destination field. */
 static void broadcast(const struct lapic *l, uint32_t icr, uint64_t tsc_hz)
 {
     icr_idle(l, tsc_hz);
@@ -224,7 +199,6 @@ static void mark(void (*progress)(int), int stage)
         progress(stage);
 }
 
-/* delay_us with a heartbeat each millisecond; *ms counts across waits. */
 static void wait_us(uint64_t us, uint64_t tsc_hz, void (*progress)(int), uint32_t *ms)
 {
     for (; us >= 1000; us -= 1000) {
@@ -259,7 +233,7 @@ uint32_t smp_start_aps(uint64_t page, struct boot_smp_cpu *cpus, uint32_t n, uin
     broadcast(&l, sipi, tsc_hz);
     delay_us(SIPI_DELAY_US, tsc_hz);
     mark(progress, SMP_STAGE_SIPI1);
-    if (parked(cpus, n) < want) /* a second SIPI is ignored by APs already running */
+    if (parked(cpus, n) < want)
         broadcast(&l, sipi, tsc_hz);
     mark(progress, SMP_STAGE_SIPI2);
     for (uint64_t waited = 0; parked(cpus, n) < want && waited < PARK_WAIT_US; waited += 1000)

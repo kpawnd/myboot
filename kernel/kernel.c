@@ -1,13 +1,4 @@
-/*
- * MYBOOT test kernel. Verifies every promise of boot protocol v1 from the
- * receiving side, prints the boot_info it was given to COM1, and (only
- * under a hypervisor) exits QEMU through isa-debug-exit so tests can be
- * automated: exit status 33 = all checks passed, 35 = a check failed.
- *
- * The screen shows a systemd-style boot log: the loader's lines, then one
- * "[  OK  ]" line per group of checks. "log_delay=MS" in the command line
- * shows the lines one at a time, MS milliseconds apart.
- */
+/* MYBOOT test kernel. */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -21,13 +12,10 @@
 
 extern const char __kernel_text[], __kernel_rodata[], __kernel_data[];
 
-/* Data and BSS probes: the loader must copy .data and zero .bss. */
 static volatile uint32_t data_probe = 0x5A5AA5A5;
 static volatile uint8_t bss_probe[4096];
 static const char rodata_probe[] = "read-only";
 
-/* Entry: capture RSP before C touches it, then tail-jump so kmain sees the
- * loader's fake return address exactly as if it had been called. */
 __asm__(".section .text\n"
         ".globl _start\n"
         "_start:\n"
@@ -37,17 +25,15 @@ __asm__(".section .text\n"
 static inline void outb(uint16_t port, uint8_t v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
 static inline uint8_t inb(uint16_t port) { uint8_t v; __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
 
-/* ---- serial output ---------------------------------------------------- */
-
 static void serial_init(void)
 {
-    outb(COM1 + 1, 0x00); /* no interrupts */
-    outb(COM1 + 3, 0x80); /* DLAB on */
-    outb(COM1 + 0, 0x01); /* divisor 1: 115200 baud */
     outb(COM1 + 1, 0x00);
-    outb(COM1 + 3, 0x03); /* 8N1, DLAB off */
-    outb(COM1 + 2, 0xC7); /* FIFO on, cleared */
-    outb(COM1 + 4, 0x03); /* DTR, RTS */
+    outb(COM1 + 3, 0x80);
+    outb(COM1 + 0, 0x01);
+    outb(COM1 + 1, 0x00);
+    outb(COM1 + 3, 0x03);
+    outb(COM1 + 2, 0xC7);
+    outb(COM1 + 4, 0x03);
 }
 
 static void serial_putc(char c)
@@ -59,14 +45,9 @@ static void serial_putc(char c)
     outb(COM1, (uint8_t)c);
 }
 
-/* ---- framebuffer console -------------------------------------------------
- * Text goes into a character grid in .bss; con_flush() draws the whole grid
- * once. Scrolling moves bytes in the grid, never pixels, because reading
- * back an uncached framebuffer is very slow. */
-
 #define CELL_W   8
-#define CELL_H   10 /* 8-pixel glyph + 2 pixels of leading */
-#define MIN_ROWS 60 /* glyphs are scaled up by whole pixels while this many rows fit */
+#define CELL_H   10
+#define MIN_ROWS 60
 #define CON_COLS 256
 #define CON_ROWS 128
 
@@ -75,7 +56,7 @@ enum { COL_TEXT, COL_OK, COL_FAIL, COL_WARN, COL_COUNT };
 static uint8_t con_chars[CON_ROWS][CON_COLS];
 static uint8_t con_color[CON_ROWS][CON_COLS];
 static uint32_t con_cols, con_rows, con_x, con_y;
-static uint32_t con_scale = 1; /* each font pixel is con_scale x con_scale */
+static uint32_t con_scale = 1;
 static uint8_t con_cur = COL_TEXT;
 
 static void con_init(const struct boot_info *bi)
@@ -86,7 +67,6 @@ static void con_init(const struct boot_info *bi)
 
     if (!fb->base || fb->bpp != 32)
         return;
-    /* An 8x8 font is unreadable on a high-resolution panel at 1:1. */
     con_scale = fb->height / (CELL_H * MIN_ROWS) ? fb->height / (CELL_H * MIN_ROWS) : 1;
     cw = CELL_W * con_scale;
     ch = CELL_H * con_scale;
@@ -164,8 +144,6 @@ static void con_flush(const struct boot_info *bi)
     }
 }
 
-/* log_delay: after each screen line, draw the screen and wait. Set only
- * once the framebuffer is known to be mapped. */
 static const struct boot_info *g_screen;
 static uint64_t g_delay_ticks;
 
@@ -178,8 +156,6 @@ static void pace(void)
         ;
 }
 
-/* Detail (each passing check, the boot_info fields, the memory map) goes to
- * serial only, so the screen stays a readable boot log. */
 static bool g_detail;
 
 static void kputc(char c)
@@ -219,11 +195,8 @@ static void put_hex(uint64_t v, int digits)
         kputc("0123456789ABCDEF"[(v >> (4 * i)) & 0xF]);
 }
 
-/* ---- checks ----------------------------------------------------------- */
-
 static unsigned g_pass, g_fail;
 
-/* "[  OK  ] " or "[FAILED] ", coloured; the caller writes the rest. */
 static void tag(bool ok)
 {
     kputc('[');
@@ -235,7 +208,7 @@ static void tag(bool ok)
 
 static void check(bool ok, const char *what)
 {
-    g_detail = ok; /* failures always reach the screen */
+    g_detail = ok;
     if (ok)
         kputs("  ok      ");
     else
@@ -249,7 +222,6 @@ static void check(bool ok, const char *what)
         g_fail++;
 }
 
-/* A group of checks ends in one screen line, OK if none of them failed. */
 static unsigned g_group_fail;
 
 static void group_begin(void) { g_group_fail = g_fail; }
@@ -258,10 +230,9 @@ static void group_end(void) { tag(g_fail == g_group_fail); }
 struct mapping {
     bool present, writable, executable;
     uint64_t phys;
-    uint8_t pat_index; /* PAT entry the leaf selects: PAT<<2 | PCD<<1 | PWT */
+    uint8_t pat_index;
 };
 
-/* Walk the live page tables through the HHDM (Intel SDM 3A 4.5). */
 static struct mapping lookup(const struct boot_info *bi, uint64_t va)
 {
     struct mapping m = {false, true, true, 0, 0};
@@ -284,7 +255,7 @@ static struct mapping lookup(const struct boot_info *bi, uint64_t va)
             uint64_t pat_bit = level == 1 ? (1ull << 7) : (1ull << 12);
 
             m.present = true;
-            m.phys = ((e & PTE_ADDR) & ~mask) | (va & mask); /* ~mask also drops a large page's PAT bit 12 */
+            m.phys = ((e & PTE_ADDR) & ~mask) | (va & mask);
             m.pat_index = (uint8_t)(((e & pat_bit) ? 4 : 0) | ((e >> 3) & 3));
             return m;
         }
@@ -384,7 +355,6 @@ static void check_machine_state(const struct boot_info *bi, uint64_t entry_rsp)
     check(rdmsr(MSR_PAT) == bi->pat && ((bi->pat >> 8) & 0xFF) == 0x01, "PAT as boot_info.pat, entry 1 WC");
     check(!(cr0 & CR0_EM) && (cr0 & CR0_MP) && (cr4 & CR4_OSFXSR) && (cr4 & CR4_OSXMMEXCPT),
           "SSE enabled: CR0.EM clear, CR0.MP, CR4.OSFXSR, CR4.OSXMMEXCPT");
-    /* With no IDT, a #UD here would reset the machine: the test fails loudly. */
     __asm__ volatile("xorps %xmm0, %xmm0");
     if (bi->cpu.features & BOOT_CPU_XSAVE) {
         bool on = (cr4 & CR4_OSXSAVE) != 0;
@@ -404,8 +374,6 @@ static void check_machine_state(const struct boot_info *bi, uint64_t entry_rsp)
     kputc('\n');
 }
 
-/* First and last byte of the framebuffer must be mapped to themselves:
- * with no IDT, touching an unmapped page would triple-fault the machine. */
 static bool fb_mapped(const struct boot_info *bi)
 {
     const struct boot_framebuffer *fb = &bi->framebuffer;
@@ -471,8 +439,6 @@ static bool str_eq(const char *a, const char *b)
     return *a == *b;
 }
 
-/* "key=N" in the command line, or -1 when absent. "modules=N" says how
- * many modules BOOT.CFG gave this entry; "log_delay=MS" paces the screen. */
 static long cmdline_num(const struct boot_info *bi, const char *key)
 {
     const char *start, *p;
@@ -497,7 +463,6 @@ static long cmdline_num(const struct boot_info *bi, const char *key)
     return -1;
 }
 
-/* The self-test module (kernel/selftest.mod) starts with this text. */
 static const char selftest_magic[] = "MYBOOT self-test module";
 
 static void check_modules(const struct boot_info *bi)
@@ -569,7 +534,6 @@ static void check_efi_mmap(const struct boot_info *bi)
           "raw EFI memory map present, in loader-reclaimable memory");
 }
 
-/* The colour of a loader status tag: "[  OK  ]", "[FAILED]", "[ WARN ]". */
 static uint8_t tag_color(const char *line, uint32_t len)
 {
     static const struct { char text[7]; uint8_t color; } tags[] = {
@@ -588,8 +552,6 @@ static uint8_t tag_color(const char *line, uint32_t len)
     return COL_TEXT;
 }
 
-/* The loader's own messages continue on the kernel's screen, so the boot
- * reads as one log. Serial already carried them, so screen only. */
 static void show_loader_log(const struct boot_info *bi)
 {
     const char *log = (const char *)(bi->hhdm_base + bi->loader_log);
@@ -658,9 +620,6 @@ static void check_firmware_tables(const struct boot_info *bi)
                                             : "Verified SMBIOS entry point\n");
 }
 
-/* The CSME report must be self-consistent: all zero when no HECI was
- * seen, a version only alongside a device and a successful query, and
- * clients only from an HBM session that got as far as enumerating. */
 static void check_csme(const struct boot_info *bi)
 {
     const struct boot_csme *c = &bi->csme;
@@ -708,14 +667,9 @@ static void check_csme(const struct boot_info *bi)
     kputc('\n');
 }
 
-/* ---- application processors ------------------------------------------ */
-
 static const struct boot_info *g_bi;
 static volatile uint32_t g_ap_arrived, g_ap_good;
 
-/* Where a released AP jumps: RDI = its boot_smp_cpu, RSP = its stack with
- * a fake return address. It checks it was set up like the BSP, reports,
- * and halts for good. */
 __attribute__((noreturn, used)) static void ap_main(struct boot_smp_cpu *self)
 {
     const struct boot_info *bi = g_bi;
@@ -733,7 +687,7 @@ __attribute__((noreturn, used)) static void ap_main(struct boot_smp_cpu *self)
          !!(cr4 & CR4_LA57) == !!(bi->flags & BOOT_F_LA57) &&
          !!(rdmsr(MSR_EFER) & EFER_NXE) == !!(bi->flags & BOOT_F_NX) &&
          (!bi->xcr0 || ((cr4 & CR4_OSXSAVE) && xgetbv0() == bi->xcr0)) &&
-         self->extra_argument == 0x4150; /* "AP": what the BSP put there */
+         self->extra_argument == 0x4150;
     if (ok)
         __atomic_fetch_add(&g_ap_good, 1, __ATOMIC_SEQ_CST);
     __atomic_fetch_add(&g_ap_arrived, 1, __ATOMIC_SEQ_CST);
@@ -741,7 +695,6 @@ __attribute__((noreturn, used)) static void ap_main(struct boot_smp_cpu *self)
         __asm__ volatile("cli; hlt");
 }
 
-/* `word` as a whole word of the command line. */
 static bool cmdline_has(const struct boot_info *bi, const char *word)
 {
     const char *start = bi->cmdline ? (const char *)(bi->hhdm_base + bi->cmdline) : "", *p;
@@ -861,7 +814,6 @@ static void print_info(const struct boot_info *bi, uint64_t tsc_kernel)
         put_dec((bi->tsc_handoff - bi->tsc_exit_start) * 1000000 / hz);
         kputs(" us final map + ExitBootServices\n");
     } else {
-        /* Release loaders skip TSC calibration: report raw ticks. */
         kputs("loader time    : ");
         put_dec(bi->tsc_handoff - bi->tsc_loader_entry);
         kputs(" TSC ticks entry->kernel (frequency unknown)\n");
@@ -882,9 +834,8 @@ __attribute__((noreturn)) void kmain(const struct boot_info *bi, uint64_t entry_
     if (valid) {
         long ms = cmdline_num(bi, "log_delay=");
 
-        con_init(bi); /* only trust framebuffer fields of a valid boot_info */
+        con_init(bi);
         if (ms > 0 && con_rows && fb_mapped(bi)) {
-            /* Release loaders may leave the frequency unknown: assume 2 GHz. */
             g_screen = bi;
             g_delay_ticks = (uint64_t)ms * ((bi->cpu.tsc_hz ? bi->cpu.tsc_hz : 2000000000ull) / 1000);
         }
@@ -919,8 +870,6 @@ __attribute__((noreturn)) void kmain(const struct boot_info *bi, uint64_t entry_
     if (valid && con_rows && fb_mapped(bi))
         con_flush(bi);
 
-    /* isa-debug-exit exists only in our QEMU setup; never poke an unknown
-     * port on real hardware. */
     if (bi->magic == BOOT_INFO_MAGIC && (bi->cpu.features & BOOT_CPU_HYPERVISOR))
         outb(QEMU_EXIT, g_fail ? 0x11 : 0x10);
     cpu_cli();

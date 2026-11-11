@@ -1,22 +1,4 @@
 #!/usr/bin/env python3
-"""
-Host test of the loader's JPEG decoder (src/image/jpeg.c), built as
-build/host/jpegdec.exe and build/host/jpegdec-asan.exe.
-
-1. Decodes test images and compares every pixel with Windows GDI+'s
-   decoding of the same file (tests/tools/gdiplus-decode.ps1). The two
-   decoders round differently, and GDI+ interpolates subsampled chroma
-   where ours repeats it, so: luma (recomputed from RGB) must agree to
-   45 dB PSNR; RGB to 35 dB and a mean difference below 2 levels, or to
-   25 dB in files with subsampled chroma and noisy colour. Images come from tests/tools/mkjpeg.py (subsampling,
-   greyscale, restart intervals, 16-bit tables, long Huffman codes, sizes
-   that are not whole MCUs) plus the shipped menu background.
-2. Files the decoder must refuse: progressive, 12-bit, truncated headers.
-3. Fuzzing: corrupted copies decoded under AddressSanitizer and UBSan must
-   decode or be refused, never crash, read out of bounds or hang.
-
-  jpeg.py [FUZZ_ITERATIONS] [SEED]
-"""
 import math
 import os
 import random
@@ -25,7 +7,7 @@ import struct
 import subprocess
 import sys
 
-sys.dont_write_bytecode = True  # no __pycache__ in the source tree
+sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "host"))
 from fuzz import asan_env  # noqa: E402
 
@@ -34,8 +16,6 @@ DEC_ASAN = os.path.abspath("build/host/jpegdec-asan.exe")
 OUT = "build/host/jpeg"
 BACKGROUND = "kernel/background.jpg"
 
-# name: mkjpeg.py arguments. Names starting "444", "grey" or "420-1x1"
-# have no chroma subsampling that shows (a 1x1 picture is one sample).
 CASES = {
     "420-64x48": ["64", "48"],
     "420-odd": ["37", "23"],
@@ -52,16 +32,13 @@ CASES = {
     "coarse": ["48", "32", "--quality", "20"],
 }
 
-
 def read_ppm(path):
     data = open(path, "rb").read()
     parts = data.split(b"\n", 3)
     w, h = (int(v) for v in parts[1].split())
     return w, h, parts[3]
 
-
 def read_bmp(path):
-    """24-bit BMP as written by GDI+: bottom-up BGR rows padded to 4 bytes."""
     d = open(path, "rb").read()
     off = struct.unpack_from("<I", d, 10)[0]
     w, h = struct.unpack_from("<ii", d, 18)
@@ -77,14 +54,11 @@ def read_bmp(path):
             out += bytes((r, g, b))
     return w, abs(h), bytes(out)
 
-
 def psnr_of(mse):
     return 99.0 if mse == 0 else 10 * math.log10(255 * 255 / mse)
 
-
 def luma_of(px, i):
     return 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]
-
 
 def compare(name, jpg):
     r = subprocess.run([DEC, jpg, jpg + ".ppm"], capture_output=True, text=True, timeout=60)
@@ -106,9 +80,7 @@ def compare(name, jpg):
     print("PASS  %-14s %s" % (name, detail))
     return None
 
-
 def refusals():
-    """name -> bytes the decoder must refuse."""
     good = open(os.path.join(OUT, "420-64x48.jpg"), "rb").read()
     sof = good.index(b"\xFF\xC0")
     cases = {
@@ -120,7 +92,6 @@ def refusals():
         "empty": b"",
     }
     return cases
-
 
 def main():
     iterations = int(sys.argv[1]) if len(sys.argv) > 1 else 300
@@ -166,7 +137,6 @@ def main():
     for it in range(iterations):
         img = bytearray(rng.choice(seeds))
         for _ in range(rng.randint(1, 10)):
-            # headers are the first few hundred bytes; hit them more often
             pos = rng.randrange(min(len(img), 700)) if rng.random() < 0.7 else rng.randrange(len(img))
             img[pos] = rng.choice([0, 0xFF, 0x80, 0x7F, 1, 0x10, rng.randrange(256)])
         if rng.random() < 0.1:
@@ -190,7 +160,6 @@ def main():
     print("%s  fuzz: %d corrupted images" % ("FAIL" if crashes else "PASS", iterations))
     failures += crashes
     sys.exit(1 if failures else 0)
-
 
 if __name__ == "__main__":
     main()

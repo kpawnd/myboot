@@ -3,10 +3,6 @@
 
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_con;
 
-/* Copy of the boot messages for the kernel (boot_info.loader_log): plain
- * ASCII, '\n' line ends. Full-screen menus pause it, since their output is
- * drawing, not log. When full it keeps the beginning, which explains what
- * happened first, and marks the cut. */
 static char     g_log[CON_LOG_MAX];
 static uint32_t g_log_len;
 static bool     g_log_paused, g_log_full;
@@ -28,7 +24,6 @@ void con_pick_mode(void)
     for (UINTN m = 0; m < (UINTN)g_con->Mode->MaxMode; m++) {
         UINTN c, r;
 
-        /* Mode 1 (80x50) may be listed but unsupported: QueryMode fails. */
         if (EFI_ERROR(g_con->QueryMode(g_con, m, &c, &r)) || c > 1000 || r > 1000)
             continue;
         if (g_nmodes < CON_MODES_MAX)
@@ -42,12 +37,10 @@ void con_pick_mode(void)
             fit = m;
         }
     }
-    /* 80x25 always fits, and on a large panel it is the stretched picture
-     * this avoids: only a fitting mode beyond it counts. */
     if (fit_cells > 80 * 25)
         best = fit;
     if (best_cells && best != (UINTN)g_con->Mode->Mode)
-        g_con->SetMode(g_con, best); /* clears the screen; on failure the mode stays */
+        g_con->SetMode(g_con, best);
 }
 
 uint32_t con_modes(const struct con_mode **modes, uint32_t *current)
@@ -78,7 +71,6 @@ void con_puts(const CHAR16 *s)
 {
     if (!g_log_paused)
         log_append(s);
-    /* The spec types String as non-const, but OutputString never writes it. */
     g_con->OutputString(g_con, (CHAR16 *)s);
 }
 
@@ -95,7 +87,7 @@ const char *con_log(uint32_t *len)
 
 void con_put_dec(uint64_t v)
 {
-    CHAR16 buf[21]; /* 2^64-1 has 20 digits, plus the terminator */
+    CHAR16 buf[21];
     unsigned i = 20;
 
     buf[i] = 0;
@@ -109,7 +101,7 @@ void con_put_dec(uint64_t v)
 void con_put_hex(uint64_t v)
 {
     static const CHAR16 digits[] = L"0123456789ABCDEF";
-    CHAR16 buf[19]; /* "0x" + 16 digits + terminator */
+    CHAR16 buf[19];
     unsigned i = 18;
 
     buf[i] = 0;
@@ -158,7 +150,6 @@ void con_size(uint32_t *cols, uint32_t *rows)
 void con_clear(void) { g_con->ClearScreen(g_con); }
 void con_goto(uint32_t col, uint32_t row) { g_con->SetCursorPosition(g_con, col, row); }
 void con_attr(uint32_t attr) { g_con->SetAttribute(g_con, attr); }
-/* Not every console can hide its cursor; failure is harmless. */
 void con_cursor(int visible) { g_con->EnableCursor(g_con, visible ? 1 : 0); }
 
 void con_put_field(const char *s, size_t len, size_t width)
@@ -169,7 +160,7 @@ void con_put_field(const char *s, size_t len, size_t width)
     for (size_t i = 0; i < width; i++) {
         uint8_t c = (i < len && s[i]) ? (uint8_t)s[i] : ' ';
         if (i < len && !s[i])
-            len = i; /* stop reading s at its NUL */
+            len = i;
         buf[n++] = (c >= 0x20 && c < 0x7F) ? c : L'?';
         if (n == 64) {
             buf[n] = 0;

@@ -4,13 +4,13 @@
 
 enum fs_error {
     FS_OK,
-    FS_IO,          /* the device read failed */
-    FS_NOT_FOUND,   /* a path component does not exist */
-    FS_NOT_DIR,     /* a path component before the last is not a directory */
-    FS_NOT_FILE,    /* the path names a directory or special file */
-    FS_LOOP,        /* too many symlinks, or the path grew too long */
-    FS_CORRUPT,     /* a structure is out of range or inconsistent */
-    FS_UNSUPPORTED, /* a feature the driver does not read */
+    FS_IO,
+    FS_NOT_FOUND,
+    FS_NOT_DIR,
+    FS_NOT_FILE,
+    FS_LOOP,
+    FS_CORRUPT,
+    FS_UNSUPPORTED,
     FS_ERROR_COUNT
 };
 

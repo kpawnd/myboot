@@ -1,15 +1,3 @@
-/*
- * The four memory routines the compiler is allowed to emit calls to even in
- * freestanding mode, and that the loader uses to zero BSS and page tables.
- *
- * memset/memcpy use REP STOSB/MOVSB: one instruction, and on CPUs with ERMS
- * (Ivy Bridge+, Zen 3+) microcode moves whole cache lines, so it is as fast
- * as a hand-vectorised loop without touching SSE state. On older CPUs it is
- * still correct and no slower than a byte loop.
- *
- * -ffreestanding stops clang turning the remaining loops back into calls to
- * these functions (loop-idiom recognition), which would recurse forever.
- */
 #include <stddef.h>
 #include <stdint.h>
 #include "lib/mem.h"

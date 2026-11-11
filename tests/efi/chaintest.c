@@ -1,9 +1,4 @@
-/*
- * Test EFI program for chainloading (tests/run.sh). Prints what it was
- * given, then either ends QEMU through isa-debug-exit with status 67
- * ((0x21 << 1) | 1), or returns to its caller if its load options contain
- * "return", to exercise the loader's handling of a program that comes back.
- */
+/* Test EFI program for chainloading (tests/run.sh). */
 #include <stddef.h>
 #include "firmware/uefi.h"
 

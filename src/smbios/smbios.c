@@ -1,8 +1,3 @@
-/*
- * SMBIOS: DSP0134 section 5.2.1 (32-bit entry point "_SM_"), 5.2.2 (64-bit
- * entry point "_SM3_") and 6.1 (structure layout: formatted area of
- * `length` bytes followed by NUL-terminated strings and a final NUL).
- */
 #include "smbios/smbios.h"
 #include "lib/mem.h"
 
@@ -71,8 +66,6 @@ const char *smbios_string(const struct smbios_info *s, uint8_t type, uint8_t fie
 
         if (slen < 4 || off + slen > end)
             return NULL;
-        /* The string set ends at the first double NUL after the formatted
-         * area; a structure without strings still has two NULs. */
         for (next = off + slen; next + 1 < end && (t[next] || t[next + 1]); next++)
             ;
         if (next + 1 >= end)
@@ -94,7 +87,7 @@ const char *smbios_string(const struct smbios_info *s, uint8_t type, uint8_t fie
             }
             return NULL;
         }
-        if (stype == 127) /* end-of-table structure */
+        if (stype == 127)
             return NULL;
         off = next + 2;
     }

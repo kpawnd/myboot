@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-Host tests for the filesystem driver (src/fs/ext4.c), run by `make test-fs`.
-
-Each image is read twice: by 7-Zip, an independent ext2/3/4 reader, and by
-build/host/ext4cat.exe, which is the loader's own driver compiled for the
-host. Every regular file, and every symlink whose target is a regular file,
-must read back identically. Paths that differ only in case are skipped,
-because the extraction goes to a case-insensitive Windows filesystem.
-
-Images: ext4 and ext2 layouts written by tests/tools/mkext4.py, and the
-ext4 image WSL ships (C:/Program Files/WSL/tools/artifacts.vhd) when it is
-installed: one made by the real mkfs.
-"""
+"""Host tests for the filesystem driver (src/fs/ext4.c), run by `make test-fs`."""
 import os
 import posixpath
 import shutil
@@ -22,7 +10,6 @@ SEVENZIP = os.environ.get("SEVENZIP", "C:/Program Files/7-Zip/7z.exe")
 HARNESS = os.path.abspath("build/host/ext4cat.exe")
 OUT = "build/host/fs"
 WSL_VHD = "C:/Program Files/WSL/tools/artifacts.vhd"
-
 
 def listing(image):
     text = subprocess.run([SEVENZIP, "l", "-slt", image], capture_output=True, text=True,
@@ -42,9 +29,7 @@ def listing(image):
             entries.append(e)
     return entries
 
-
 def resolve(path, files, links, depth=0):
-    """Follows symlinks the way the driver should; None if it leads nowhere."""
     if depth > 8:
         return None
     parts = [p for p in path.split("/") if p]
@@ -58,10 +43,7 @@ def resolve(path, files, links, depth=0):
             return resolve(new, files, links, depth + 1)
     return path if path in files else None
 
-
 def check(name, image, offset, size, truth=None):
-    """`truth`: an image with the same files that 7-Zip reads, for layouts
-    7-Zip does not understand (meta_bg)."""
     work = os.path.join(OUT, name)
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(os.path.join(work, "x"))
@@ -74,20 +56,17 @@ def check(name, image, offset, size, truth=None):
         lower.setdefault(p.lower(), []).append(p)
     clash = {p for group in lower.values() if len(group) > 1 for p in group}
 
-    # Symlinks cannot be created without privileges on Windows; 7-Zip then
-    # exits with 2 but extracts every regular file.
     r = subprocess.run([SEVENZIP, "x", "-y", "-o" + os.path.join(work, "x"), truth or image],
                        capture_output=True, text=True)
     if r.returncode not in (0, 2):
         print("FAIL  %-14s 7-Zip cannot extract it:\n%s" % (name, r.stdout[-2000:]))
         return False
-    # When 7-Zip opens a container (VHD), files land under the inner image's name.
     root = os.path.join(work, "x")
     inner = [d for d in os.listdir(root) if d.endswith(".ext")]
     if inner and os.path.isdir(os.path.join(root, inner[0])):
         root = os.path.join(root, inner[0])
 
-    cases = []  # (path asked for, file whose content it must have)
+    cases = []
     for p in sorted(files - clash):
         cases.append((p, p))
     for p in sorted(links):
@@ -125,9 +104,7 @@ def check(name, image, offset, size, truth=None):
     sys.stdout.flush()
     return not bad
 
-
 def expect_errors(name, image, want):
-    """Paths that must fail with a given error."""
     work = os.path.join(OUT, name)
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
@@ -147,11 +124,9 @@ def expect_errors(name, image, want):
         print("      " + b)
     return not bad
 
-
 def mkext4(out, *args):
     subprocess.run([sys.executable, "tests/tools/mkext4.py", out] + list(args), check=True)
     return out
-
 
 def main():
     os.makedirs(OUT, exist_ok=True)
@@ -171,7 +146,6 @@ def main():
             "--inodes-per-group", "16", "--extras", "--fragment", "5"] + payload
     ref = mkext4(os.path.join(OUT, "ext2.img"), *ext2)
     ok &= check("ext2", ref, 0, os.path.getsize(ref))
-    # 7-Zip ignores meta_bg: the same files without it are the reference.
     img = mkext4(os.path.join(OUT, "ext2-meta.img"), "--meta-bg", *ext2)
     ok &= check("ext2-meta-bg", img, 0, os.path.getsize(img), truth=ref)
     ok &= expect_errors("errors", os.path.join(OUT, "ext4.img"), [
@@ -186,7 +160,6 @@ def main():
     else:
         print("SKIP  wsl-vhd: %s not installed" % WSL_VHD)
     sys.exit(0 if ok else 1)
-
 
 if __name__ == "__main__":
     main()

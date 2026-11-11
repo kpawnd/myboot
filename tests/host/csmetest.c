@@ -1,16 +1,3 @@
-/*
- * Host test for src/csme/csme.c: runs csme_probe and csme_query_version
- * and csme_hbm_session against a simulated HECI1 device. The simulation
- * holds 256 bytes of configuration space and the four HECI registers, and
- * an ME that answers GET_FW_VERSION at MKHI's fixed address the way a test
- * case asks (correctly, never, with an error result, with a reply for
- * someone else), and speaks HBM: start, enumerate, client properties,
- * connect with flow control, disconnect, stop.
- *
- * Besides each case's result, every case checks what the code must never
- * do: touch MMIO while memory decoding is off, write any configuration
- * register but Command, or leave Command changed.
- */
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,22 +13,20 @@
 #define CSR_IG    (1u << 2)
 #define CSR_RDY   (1u << 3)
 
-/* How the fixed-address MKHI answers. REPLY_REFUSED goes for MKHI over HBM
- * too: it is the same firmware saying no. */
 enum reply { REPLY_OK, REPLY_NONE, REPLY_REFUSED, REPLY_WRONG_CLIENT };
 
-#define MKHI_AT 7 /* the simulated ME's MKHI client address */
+#define MKHI_AT 7
 
 static struct sim {
     uint8_t  cfg[256];
-    uint32_t host_csr, me_csr;     /* RDY/IS bits; pointers are computed */
-    uint32_t hbuf[DEPTH], hn;      /* host -> ME, not yet consumed */
-    uint32_t mbuf[DEPTH], mr, mw;  /* ME -> host */
+    uint32_t host_csr, me_csr;
+    uint32_t hbuf[DEPTH], hn;
+    uint32_t mbuf[DEPTH], mr, mw;
     enum reply reply;
-    bool hbm_silent;               /* the ME ignores HBM */
-    bool mkhi_connect;             /* MKHI is not fixed-address: connect first */
-    bool early_flow;               /* flow-control grant before the connect response */
-    bool stop_silent;              /* no HOST_STOP answer, as on Arrow Lake */
+    bool hbm_silent;
+    bool mkhi_connect;
+    bool early_flow;
+    bool stop_silent;
     bool started, connected, host_credit, stopped;
     unsigned mkhi_hbm_answered;
     uint16_t cmd_initial;
@@ -82,13 +67,12 @@ static void me_msg(uint8_t me, uint8_t host, const uint32_t *d, uint32_t len)
 static void me_version(uint8_t me, uint8_t host)
 {
     uint32_t d[7] = {0x82FFu | (S.reply == REPLY_REFUSED ? 0x89u << 24 : 0),
-                     1 | (16u << 16),    /* minor 1, major 16, platform 0 */
-                     2307 | (30u << 16), /* build 2307, hotfix 30 */
-                     0xEEEEEEEE, 0xEEEEEEEE, 0xEEEEEEEE, 0xEEEEEEEE}; /* recovery, FITC */
+                     1 | (16u << 16),
+                     2307 | (30u << 16),
+                     0xEEEEEEEE, 0xEEEEEEEE, 0xEEEEEEEE, 0xEEEEEEEE};
     me_msg(me, host, d, 28);
 }
 
-/* The simulated ME's clients: AMTHI, MKHI, and one nobody named. */
 static const struct { uint8_t addr; uint32_t uuid[4]; } clients[] = {
     {2, {0x12f80028, 0x4b2db4b7, 0xe046a8ac, 0x4c8165ff}},
     {MKHI_AT, {0x55213584, 0x49169a29, 0xb70fdfba, 0xeb2a68ed}},
@@ -102,7 +86,7 @@ static void me_hbm(const uint32_t *d)
 
     r[0] = cmd | 0x80u;
     switch (cmd) {
-    case 0x01: /* start: the ME speaks 2.2 and takes the host's version */
+    case 0x01:
         S.started = true;
         r[0] |= (2u << 8) | (2u << 16) | (1u << 24);
         me_msg(0, 0, r, 4);
@@ -127,7 +111,7 @@ static void me_hbm(const uint32_t *d)
             }
         me_msg(0, 0, r, 28);
         break;
-    case 0x06: { /* connect: the response, and a flow-control grant for the client */
+    case 0x06: {
         uint32_t flow[2] = {0x08u | ((uint32_t)me << 8), 0};
         r[0] = d[0] | 0x80u;
         if (S.early_flow)
@@ -149,7 +133,6 @@ static void me_hbm(const uint32_t *d)
     }
 }
 
-/* The ME reads the host buffer when the host sets IG: one message. */
 static void me_process(void)
 {
     uint32_t hdr = S.hbuf[0], me = hdr & 0xFF, host = (hdr >> 8) & 0xFF, len = (hdr >> 16) & 0x1FF;
@@ -162,7 +145,7 @@ static void me_process(void)
     if (me == 0 && host == 0) {
         if (!S.hbm_silent)
             me_hbm(d);
-    } else if (me == MKHI_AT && host == 0) { /* the fixed address */
+    } else if (me == MKHI_AT && host == 0) {
         if (len == 4 && d[0] == 0x02FFu && S.reply != REPLY_NONE)
             me_version(S.reply == REPLY_WRONG_CLIENT ? 0x08 : MKHI_AT, 0);
     } else if (me == MKHI_AT && S.started && !S.stopped) {
@@ -210,16 +193,15 @@ static void delay_us(uint32_t us) { S.waited_us += us; }
 
 static const struct csme_ops ops = {cfg_read32, cfg_write16, mmio_read32, mmio_write32, delay_us};
 
-/* A Tiger Lake-LP HECI in normal state, memory decoding off, link ready. */
 static void sim_reset(enum reply reply)
 {
     memset(&S, 0, sizeof(S));
     wr32(&S.cfg[0x00], 0xA0E08086);
-    wr32(&S.cfg[0x04], 0x00100000);            /* Command 0, Status: capabilities list */
-    wr32(&S.cfg[0x08], 0x07800030);            /* class 0780, revision 0x30 */
-    wr32(&S.cfg[0x10], (uint32_t)BAR | 0x4);   /* 64-bit memory BAR */
+    wr32(&S.cfg[0x04], 0x00100000);
+    wr32(&S.cfg[0x08], 0x07800030);
+    wr32(&S.cfg[0x10], (uint32_t)BAR | 0x4);
     wr32(&S.cfg[0x14], 0);
-    wr32(&S.cfg[0x40], 0x90000245);            /* normal, init complete, mode 0 */
+    wr32(&S.cfg[0x40], 0x90000245);
     wr32(&S.cfg[0x48], 0x32280106);
     wr32(&S.cfg[0x60], 0x00000020);
     S.host_csr = S.me_csr = CSR_RDY;
@@ -237,7 +219,6 @@ static void check(bool ok, const char *name, const char *what)
         g_fail++;
 }
 
-/* What every case must hold, whatever its result. */
 static void check_invariants(const char *name)
 {
     check(S.mmio_while_off == 0, name, "no MMIO while memory decoding is off");
@@ -259,7 +240,6 @@ static struct boot_csme run(void)
     return c;
 }
 
-/* The HBM session ran to the end and found the three simulated clients. */
 static void check_session(const char *name)
 {
     check(S.started && S.stopped && !S.connected, name, "HBM started, stopped, nothing left connected");
@@ -276,13 +256,13 @@ int main(void)
     static const uint8_t zero[sizeof(struct boot_csme)];
 
     sim_reset(REPLY_OK);
-    memset(S.cfg, 0xFF, sizeof(S.cfg)); /* nothing at 00:16.0 */
+    memset(S.cfg, 0xFF, sizeof(S.cfg));
     c = run();
     check(!memcmp(&c, zero, sizeof(c)), "absent", "all fields zero");
     check(S.mmio_writes == 0, "absent", "no MMIO");
 
     sim_reset(REPLY_OK);
-    wr32(&S.cfg[0x08], 0x01060130); /* an Intel SATA controller, not HECI */
+    wr32(&S.cfg[0x08], 0x01060130);
     c = run();
     check(c.vendor_id == 0 && c.flags == 0, "other device", "not taken for HECI");
 
@@ -322,13 +302,13 @@ int main(void)
     check_invariants("silent stop");
 
     sim_reset(REPLY_OK);
-    wr32(&S.cfg[0x04], 0x00100006); /* decoding already on, bus master on */
+    wr32(&S.cfg[0x04], 0x00100006);
     c = run();
     check(c.version_status == BOOT_CSME_ST_OK, "decoding on", "version read");
     check_invariants("decoding on");
 
     sim_reset(REPLY_OK);
-    wr32(&S.cfg[0x40], 0x90030245); /* soft temporary disable */
+    wr32(&S.cfg[0x40], 0x90030245);
     c = run();
     check(c.op_mode == 3 && c.version_status == BOOT_CSME_ST_NOT_NORMAL &&
           c.hbm_status == BOOT_CSME_ST_NOT_NORMAL && c.client_count == 0, "disabled", "not asked");
@@ -336,33 +316,32 @@ int main(void)
     check_invariants("disabled");
 
     sim_reset(REPLY_OK);
-    wr32(&S.cfg[0x40], 0x90000045); /* init not complete */
+    wr32(&S.cfg[0x40], 0x90000045);
     c = run();
     check(!(c.flags & BOOT_CSME_INIT_COMPLETE) && c.version_status == BOOT_CSME_ST_NOT_NORMAL,
           "initializing", "not asked");
 
     sim_reset(REPLY_OK);
-    wr32(&S.cfg[0x10], 0x4); /* BAR never assigned */
+    wr32(&S.cfg[0x10], 0x4);
     c = run();
     check(c.version_status == BOOT_CSME_ST_NO_BAR && c.hbm_status == BOOT_CSME_ST_NO_BAR && S.mmio_writes == 0,
           "no BAR", "not asked, no MMIO");
     check_invariants("no BAR");
 
     sim_reset(REPLY_OK);
-    S.host_csr = 0; /* firmware never brought the host side up */
+    S.host_csr = 0;
     c = run();
     check(c.version_status == BOOT_CSME_ST_NOT_READY && c.hbm_status == BOOT_CSME_ST_NOT_READY &&
           S.mmio_writes == 0, "not ready", "no write, no reset");
     check_invariants("not ready");
 
     sim_reset(REPLY_OK);
-    me_send(0x12345678); /* a stale message from the ME */
+    me_send(0x12345678);
     c = run();
     check(c.version_status == BOOT_CSME_ST_BUSY && c.hbm_status == BOOT_CSME_ST_BUSY && S.mmio_writes == 0,
           "busy", "no write");
     check_invariants("busy");
 
-    /* Fixed address closed (after End-of-POST, say): HBM still gets the version. */
     sim_reset(REPLY_NONE);
     c = run();
     check(c.version_status == BOOT_CSME_ST_TIMEOUT, "fixed closed", "fixed address timed out");

@@ -1,26 +1,8 @@
-/*
- * The boot log, in every build configuration. One line per step, tagged the
- * way systemd tags its boot messages:
- *
- *   [  OK  ] Loaded kernel \EFI\MYBOOT\KERNEL.ELF (46 KiB)
- *   [FAILED] cannot open module: \EFI\MYBOOT\NOPE.MOD (not found)
- *   [ WARN ] BOOT.CFG line 3: unknown directive
- *            Booting 'Test kernel'
- *
- * Progress: a file load first shows "[  ..  ] Loading kernel X", cut to one
- * screen row, and is rewritten in place ("\r") as the OK or FAILED line once
- * the result is known. Only the final line goes into the log the kernel
- * receives.
- *
- * Errors and warnings are also kept, so the menu and the recovery screen
- * can show them again after clearing the screen. Each record holds its
- * formatted line, because the detail (often a path) usually lives in a
- * stack buffer.
- */
+/* The boot log, in every build configuration. */
 #include "firmware/uefi_boot.h"
 #include "firmware/uefi_console.h"
 
-#define TAG_LEN 9 /* "[  OK  ] " */
+#define TAG_LEN 9
 
 struct line {
     char     buf[BOOT_ERROR_LINE];
@@ -32,8 +14,8 @@ static struct line g_err[BOOT_ERRORS_MAX];
 static uint32_t g_nerr;
 static bool g_dropped;
 
-static struct line g_line;   /* the blog_* line being built */
-static struct line g_prog;   /* the open progress line: "kernel X" */
+static struct line g_line;
+static struct line g_prog;
 static bool g_prog_open;
 
 static void put_str(struct line *l, const char *s)
@@ -42,7 +24,6 @@ static void put_str(struct line *l, const char *s)
         l->buf[l->n++] = *s;
 }
 
-/* UEFI messages are L"" literals of plain ASCII. */
 static void put_wstr(struct line *l, const CHAR16 *s)
 {
     for (; *s && l->n + 1 < BOOT_ERROR_LINE; s++)
@@ -81,8 +62,6 @@ static void put_size(struct line *l, uint64_t bytes)
     }
 }
 
-/* ---- output --------------------------------------------------------------- */
-
 static void put_tag(uint8_t tag)
 {
     static const struct { const CHAR16 *text; uint32_t attr; } tags[] = {
@@ -113,8 +92,6 @@ static void emit(const struct line *l)
     con_puts(L"\r\n");
 }
 
-/* The open progress line, rewritten in place as FAILED. Out of the log:
- * the error that follows says the same with its reason. */
 static void close_progress_failed(void)
 {
     if (!g_prog_open)
@@ -128,8 +105,6 @@ static void close_progress_failed(void)
     con_log_pause(0);
     g_prog_open = false;
 }
-
-/* ---- errors ----------------------------------------------------------------- */
 
 static struct line *next_slot(uint8_t tag)
 {
@@ -199,10 +174,9 @@ void boot_error_more(const char *file, uint32_t count)
     record(l);
 }
 
-/* The statuses file and memory operations return (UEFI Appendix D). */
 const char *boot_status_name(EFI_STATUS s)
 {
-    if (s & EFI_OEM_BIT) /* FS_STATUS: our own filesystem drivers */
+    if (s & EFI_OEM_BIT)
         return fs_strerror((enum fs_error)(s & 0xFF));
     switch (s & ~EFI_ERROR_BIT) {
     case 1:  return "load error";
@@ -222,8 +196,6 @@ const char *boot_status_name(EFI_STATUS s)
     }
 }
 
-/* ---- progress ----------------------------------------------------------------- */
-
 void boot_progress(const CHAR16 *what, const char *path)
 {
     uint32_t cols, rows, room, len = 0;
@@ -236,10 +208,8 @@ void boot_progress(const CHAR16 *what, const char *path)
     g_prog.buf[g_prog.n] = 0;
     g_prog_open = true;
 
-    /* One screen row, so "\r" returns to its start: keep the end of a long
-     * path, which names the file. */
     con_size(&cols, &rows);
-    room = cols - 1 - TAG_LEN - 8; /* "Loading " */
+    room = cols - 1 - TAG_LEN - 8;
     while (path[len])
         len++;
     con_log_pause(1);
@@ -275,15 +245,12 @@ void boot_progress_done(uint64_t bytes)
     blog_end(TAG_OK);
 }
 
-/* ---- other lines ---------------------------------------------------------- */
-
 void blog_str(const char *s) { put_str(&g_line, s); }
 void blog_wstr(const CHAR16 *s) { put_wstr(&g_line, s); }
 void blog_dec(uint64_t v) { put_num(&g_line, v, 10); }
 void blog_hex(uint64_t v) { put_num(&g_line, v, 16); }
 void blog_size(uint64_t bytes) { put_size(&g_line, bytes); }
 
-/* ASCII from firmware tables or the config: non-printables become '?'. */
 void blog_ascii(const char *s, size_t max)
 {
     for (size_t i = 0; i < max && s[i] && g_line.n + 1 < BOOT_ERROR_LINE; i++)
@@ -298,8 +265,6 @@ void blog_end(enum boot_tag tag)
     emit(&g_line);
     g_line.n = 0;
 }
-
-/* ---- kept errors -------------------------------------------------------- */
 
 uint32_t boot_errors_count(void)
 {

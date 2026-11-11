@@ -1,8 +1,4 @@
-/*
- * ELF64 kernel image validation. Firmware-independent and allocation-free:
- * it parses headers already in memory and produces a load plan; the backend
- * performs the reads into the final location.
- */
+/* ELF64 kernel image validation. */
 #ifndef ELF_ELF_H
 #define ELF_ELF_H
 
@@ -10,10 +6,10 @@
 #include <stdint.h>
 #include "core/util.h"
 
-#define ELF_MAX_SEGMENTS 16          /* PT_LOAD entries we accept */
-#define ELF_MAX_PHDRS    64          /* program headers of any type */
-#define ELF_MAX_SPAN     GiB(1)      /* sanity limit on the image span */
-#define ELF_MAX_ALIGN    (2u << 20)  /* largest p_align we honour physically */
+#define ELF_MAX_SEGMENTS 16
+#define ELF_MAX_PHDRS    64
+#define ELF_MAX_SPAN     GiB(1)
+#define ELF_MAX_ALIGN    (2u << 20)
 
 #define PF_X 1u
 #define PF_W 2u
@@ -24,16 +20,16 @@ struct elf_segment {
     uint64_t memsz;
     uint64_t offset;
     uint64_t filesz;
-    uint32_t flags; /* PF_* */
+    uint32_t flags;
 };
 
 struct elf_image {
     uint64_t entry;
-    uint64_t vbase;  /* lowest PT_LOAD vaddr, page-aligned down */
-    uint64_t vend;   /* highest PT_LOAD end, page-aligned up */
-    uint64_t align;  /* physical alignment to honour, 4 KiB .. 2 MiB */
+    uint64_t vbase;
+    uint64_t vend;
+    uint64_t align;
     uint32_t nseg;
-    struct elf_segment seg[ELF_MAX_SEGMENTS]; /* sorted by vaddr */
+    struct elf_segment seg[ELF_MAX_SEGMENTS];
 };
 
 enum elf_error {
@@ -57,10 +53,6 @@ enum elf_error {
     ELF_ERR_ENTRY
 };
 
-/*
- * hdr/hdr_len: the first bytes of the file (all program headers must lie
- * inside them). file_size: total file size, for bounding segment reads.
- */
 enum elf_error elf_parse(const void *hdr, uint64_t hdr_len, uint64_t file_size,
                          struct elf_image *out);
 const char *elf_strerror(enum elf_error e);

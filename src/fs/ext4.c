@@ -1,27 +1,4 @@
-/*
- * Read-only ext2/3/4 (interface and limits in include/fs/ext4.h).
- *
- * Layout, as far as reading files needs it (kernel.org, "ext4 Data
- * Structures and Algorithms"):
- *   superblock     1024 bytes at byte 1024 of the volume
- *   block groups   blocks_per_group blocks each, starting at first_data_block;
- *                  each group's descriptor gives its inode table
- *   inodes         inode N is entry (N-1) % inodes_per_group of the table
- *                  of group (N-1) / inodes_per_group; inode 2 is the root
- *   file data      i_block holds either an extent tree root (EXTENTS_FL) or
- *                  12 direct + single, double, triple indirect pointers
- *   directories    files of variable-length entries {inode, rec_len,
- *                  name_len, type, name}; htree indexes hide inside entries
- *                  with inode 0, so a linear scan stays correct
- *
- * Every number read from disk is checked before it is used as an index or
- * an address: a corrupt or hostile filesystem gives FS_CORRUPT, never a
- * read outside the device or a buffer.
- *
- * Large reads go straight from the device into the caller's buffer, one
- * read per contiguous run of blocks, so a kernel stored in a few extents
- * costs a few device reads.
- */
+/* Read-only ext2/3/4 (interface and limits in include/fs/ext4.h). */
 #include "fs/ext4.h"
 #include "core/util.h"
 #include "lib/mem.h"
@@ -31,7 +8,7 @@
 #define ROOT_INO    2
 #define MAX_LINKS   8
 #define NAME_MAX    255
-#define DIR_MAX     MiB(256) /* millions of entries; larger is corruption */
+#define DIR_MAX     MiB(256)
 
 #define INCOMPAT_COMPRESSION 0x0001u
 #define INCOMPAT_FILETYPE    0x0002u
@@ -53,14 +30,14 @@
 
 #define EXTENT_MAGIC     0xF30A
 #define EXTENT_MAX_DEPTH 5
-#define EXTENT_INIT_MAX  32768u /* longer lengths mark unwritten extents */
+#define EXTENT_INIT_MAX  32768u
 
-static uint8_t  g_node[EXT4_MAX_BLOCK];   /* extent tree node below the root */
-static uint8_t  g_ind[3][EXT4_MAX_BLOCK]; /* block maps: one indirect block per level */
-static uint64_t g_ind_blk[3];             /* block each g_ind holds; 0: none */
-static const struct ext4_fs *g_ind_fs;    /* filesystem g_ind belongs to */
-static uint8_t  g_dir[EXT4_MAX_BLOCK];    /* directory block being searched */
-static char     g_path[2][EXT4_PATH_MAX]; /* path being walked, and its successor */
+static uint8_t  g_node[EXT4_MAX_BLOCK];
+static uint8_t  g_ind[3][EXT4_MAX_BLOCK];
+static uint64_t g_ind_blk[3];
+static const struct ext4_fs *g_ind_fs;
+static uint8_t  g_dir[EXT4_MAX_BLOCK];
+static char     g_path[2][EXT4_PATH_MAX];
 
 static size_t str_len(const char *s)
 {
@@ -111,8 +88,6 @@ enum fs_error ext4_mount(struct ext4_fs *fs, struct blockdev *dev)
         fs->desc_size < 32 || !is_pow2(fs->desc_size) || fs->desc_size > fs->block_size ||
         ((fs->incompat & INCOMPAT_64BIT) && fs->desc_size < 64))
         return FS_CORRUPT;
-    /* The filesystem must fit in the partition: every block address below
-     * `blocks` is then a valid device offset. */
     if (fs->blocks <= fs->first_data_block || fs->blocks > (dev->size >> fs->log_block))
         return FS_CORRUPT;
     uint64_t groups = (fs->blocks - fs->first_data_block + fs->blocks_per_group - 1) /
@@ -123,8 +98,6 @@ enum fs_error ext4_mount(struct ext4_fs *fs, struct blockdev *dev)
     return FS_OK;
 }
 
-/* sparse_super keeps superblock (and descriptor table) backups only in
- * groups 0, 1 and powers of 3, 5 and 7. */
 static bool has_super(const struct ext4_fs *fs, uint32_t g)
 {
     if (!(fs->ro_compat & RO_COMPAT_SPARSE_SUPER) || g <= 1)
@@ -145,8 +118,6 @@ static enum fs_error inode_table(const struct ext4_fs *fs, uint32_t g, uint64_t 
     uint64_t off;
     uint8_t d[64];
 
-    /* meta_bg: from first_meta_bg on, each run of per_block groups keeps
-     * its descriptors in one block at the start of the run's first group. */
     if ((fs->incompat & INCOMPAT_META_BG) && g / per_block >= fs->first_meta_bg) {
         uint32_t first = g - g % per_block;
         uint64_t b = fs->first_data_block + (uint64_t)first * fs->blocks_per_group +
@@ -192,16 +163,12 @@ static enum fs_error read_inode(const struct ext4_fs *fs, uint32_t ino, struct e
     return FS_OK;
 }
 
-/* ---- logical -> physical block mapping ------------------------------------
- * Each mapper returns the run starting at `lblk`: *pblk is its first
- * physical block (0: a hole, read as zeros) and *count its length. */
-
 static enum fs_error map_extent(const struct ext4_fs *fs, const struct ext4_inode *in, uint32_t lblk,
                                 uint64_t *pblk, uint64_t *count)
 {
     const uint8_t *node = in->block;
     uint32_t node_size = sizeof(in->block);
-    uint64_t limit = 1ull << 32; /* first logical block past this subtree */
+    uint64_t limit = 1ull << 32;
     int depth = EXTENT_MAX_DEPTH + 1;
 
     for (;;) {
@@ -236,7 +203,6 @@ static enum fs_error map_extent(const struct ext4_fs *fs, const struct ext4_inod
             return FS_OK;
         }
 
-        /* Index node: the last child that starts at or before lblk. */
         uint32_t i = 0;
         uint64_t child;
         if (n == 0)
@@ -279,7 +245,6 @@ static enum fs_error ind_block(const struct ext4_fs *fs, int level, uint64_t blk
     return FS_OK;
 }
 
-/* The run of consecutive block numbers (or of zeros) from table[idx]. */
 static void ptr_run(const uint8_t *table, uint32_t idx, uint32_t n, uint64_t *pblk, uint64_t *count)
 {
     uint32_t p = rd32(table + 4 * idx), k = 1;
@@ -293,7 +258,7 @@ static void ptr_run(const uint8_t *table, uint32_t idx, uint32_t n, uint64_t *pb
 static enum fs_error map_blockmap(const struct ext4_fs *fs, const struct ext4_inode *in, uint32_t lblk,
                                   uint64_t *pblk, uint64_t *count)
 {
-    uint32_t apb = fs->block_size / 4; /* pointers per block */
+    uint32_t apb = fs->block_size / 4;
     uint64_t off = lblk, cover = apb;
     uint32_t ptr;
     int levels = 1;
@@ -332,7 +297,7 @@ static enum fs_error map_blockmap(const struct ext4_fs *fs, const struct ext4_in
         off -= idx * each;
         cover = each;
     }
-    return FS_CORRUPT; /* not reached: the last level has each == 1 */
+    return FS_CORRUPT;
 }
 
 static enum fs_error map(const struct ext4_fs *fs, const struct ext4_inode *in, uint64_t lblk,
@@ -349,14 +314,12 @@ static enum fs_error map(const struct ext4_fs *fs, const struct ext4_inode *in, 
     return e;
 }
 
-/* [off, off+len) of the inode's data; the caller has checked the bounds. */
 static enum fs_error read_data(const struct ext4_fs *fs, const struct ext4_inode *in, uint64_t off,
                                uint8_t *dst, uint64_t len)
 {
     if (in->flags & FL_ENCRYPT)
         return FS_UNSUPPORTED;
     if (in->flags & FL_INLINE) {
-        /* Data past the 60 bytes of i_block lives in an extended attribute. */
         if (in->size > sizeof(in->block))
             return FS_UNSUPPORTED;
         memcpy(dst, in->block + off, len);
@@ -389,8 +352,6 @@ enum fs_error ext4_read(struct ext4_file *f, uint64_t offset, void *dst, uint64_
     return read_data(f->fs, &f->inode, offset, dst, len);
 }
 
-/* ---- directories and paths ----------------------------------------------- */
-
 static enum fs_error scan_entries(const struct ext4_fs *fs, const uint8_t *b, uint32_t len,
                                   const char *name, uint32_t nlen, uint32_t *ino)
 {
@@ -402,7 +363,7 @@ static enum fs_error scan_entries(const struct ext4_fs *fs, const uint8_t *b, ui
         if (!filetype)
             elen |= (uint32_t)b[off + 7] << 8;
         if (fs->block_size == 65536 && (rec == 0 || rec == 65535))
-            rec = 65536; /* the one rec_len that does not fit in 16 bits */
+            rec = 65536;
         if (rec < 8 || rec % 4 || rec > len - off || elen + 8 > rec)
             return FS_CORRUPT;
         if (rd32(b + off) && elen == nlen && !memcmp(b + off + 8, name, nlen)) {
@@ -424,7 +385,6 @@ static enum fs_error dir_lookup(const struct ext4_fs *fs, const struct ext4_inod
     if (dir->flags & FL_ENCRYPT)
         return FS_UNSUPPORTED;
     if (dir->flags & FL_INLINE) {
-        /* i_block: the parent's inode number, then 56 bytes of entries. */
         if (nlen == 2 && name[0] == '.' && name[1] == '.') {
             *ino = rd32(dir->block);
             return FS_OK;
@@ -432,7 +392,6 @@ static enum fs_error dir_lookup(const struct ext4_fs *fs, const struct ext4_inod
         e = scan_entries(fs, dir->block + 4, sizeof(dir->block) - 4, name, nlen, ino);
         return e == FS_NOT_FOUND && dir->size > sizeof(dir->block) ? FS_UNSUPPORTED : e;
     }
-    /* Bounded so a corrupt size cannot keep the loader reading for hours. */
     if (dir->size > DIR_MAX)
         return FS_CORRUPT;
     for (uint64_t off = 0; off < dir->size; off += fs->block_size) {
@@ -441,7 +400,7 @@ static enum fs_error dir_lookup(const struct ext4_fs *fs, const struct ext4_inod
 
         if ((e = map(fs, dir, off >> fs->log_block, &pblk, &count)) != FS_OK)
             return e;
-        if (!pblk) /* directories have no holes */
+        if (!pblk)
             return FS_CORRUPT;
         if (bdev_read(fs->dev, pblk << fs->log_block, g_dir, n))
             return FS_IO;
@@ -451,15 +410,12 @@ static enum fs_error dir_lookup(const struct ext4_fs *fs, const struct ext4_inod
     return FS_NOT_FOUND;
 }
 
-/* A symlink's target, `in->size` bytes, into dst. */
 static enum fs_error read_link(const struct ext4_fs *fs, const struct ext4_inode *in, char *dst)
 {
     uint32_t acl_blocks = in->file_acl ? fs->block_size / 512 : 0;
 
     if (in->flags & FL_ENCRYPT)
         return FS_UNSUPPORTED;
-    /* Fast symlink: the target sits in i_block and the inode owns no
-     * data blocks (an extended attribute block may still be counted). */
     if (in->size < sizeof(in->block) && in->blocks_lo == acl_blocks && !(in->flags & FL_INLINE)) {
         memcpy(dst, in->block, in->size);
         return FS_OK;
@@ -504,8 +460,6 @@ enum fs_error ext4_open(struct ext4_fs *fs, const char *path, struct ext4_file *
             continue;
         }
 
-        /* Symlink: continue with target + "/" + the rest of the path, from
-         * the root if the target is absolute, else from this directory. */
         char *np = g_path[buf ^ 1];
         size_t rest = str_len(p);
         if (++links > MAX_LINKS || next.size == 0 || next.size + 1 + rest >= EXT4_PATH_MAX)

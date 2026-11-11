@@ -1,26 +1,4 @@
-# MYBOOT build. Run from Git Bash (recipes use POSIX sh).
-#
-#   make [CONFIG=debug|balanced|release]   build BOOTX64.EFI + test kernel, BOOT.CFG
-#                                          and self-test module into the ESP
-#   make configs                           build all three configurations
-#   make size                              byte size of every built config
-#   make run                               boot the ESP in QEMU + OVMF (window + serial)
-#   make test                              headless boot; passes iff the test kernel
-#                                          reports every check passed
-#   make test-all                          every scenario in tests/run.sh: config,
-#                                          fallback, menu, broken kernels
-#   make test-fs                           filesystem drivers on the host: every file of
-#                                          test images against 7-Zip, plus fuzzing
-#   make test-csme                         CSME detection on the host, against a
-#                                          simulated HECI device
-#   make test-jpeg                         the menu background's JPEG decoder on the
-#                                          host, against Windows GDI+, plus fuzzing
-#   make screenshots                       PNGs of the menu, editor and boot log for the
-#                                          README, into build/$(CONFIG)/screenshots
-#   make run-gdb                           like run, paused, gdbstub on :1234
-#   make iso                               build/$(CONFIG)/myboot.iso (UEFI, hybrid CD/USB)
-#   make run-iso                           boot that ISO in QEMU as a CD-ROM
-#   make clean
+# MYBOOT build.
 
 CONFIG ?= debug
 BUILD  := build/$(CONFIG)
@@ -35,50 +13,24 @@ CC    := clang
 LD    := lld-link
 KLD   := ld.lld
 
-# --target=x86_64-unknown-windows : emit COFF objects with the MS x64 ABI that
-#                                   UEFI uses; lld-link then writes PE32+.
-# -ffreestanding                  : no hosted libc assumptions; also stops clang
-#                                   rewriting loops into memset/memcpy calls.
-# -fno-stack-protector            : no __stack_chk_guard runtime exists.
-# -mno-stack-arg-probe            : no __chkstk calls for large frames (no CRT).
-# -mno-red-zone                   : nothing may assume memory below RSP is safe
-#                                   (interrupt handlers share our stack).
-# -mgeneral-regs-only             : never touch SSE/x87 state; firmware owns it.
-# -fshort-wchar                   : L"" literals are 16-bit, matching CHAR16.
-# -fno-*unwind-tables             : no .pdata/.xdata; nothing unwinds the stack.
 CFLAGS := --target=x86_64-unknown-windows -std=c11 -ffreestanding \
           -fno-stack-protector -mno-stack-arg-probe -mno-red-zone \
           -mgeneral-regs-only -fshort-wchar \
           -fno-asynchronous-unwind-tables -fno-unwind-tables \
           -Wall -Wextra -Werror -Iinclude -MMD -MP
 
-# CSME_QUERY=0: the CSME check only reads PCI configuration space and never
-# sends the firmware version request (see README). Run make clean after
-# changing it: objects do not depend on command-line variables.
 CSME_QUERY ?= 1
 CFLAGS += -DBOOT_CSME_QUERY=$(CSME_QUERY)
 
-# /subsystem:efi_application : PE subsystem 10, what firmware requires.
-# /entry:efi_main            : no CRT startup; firmware calls us directly.
-# /nodefaultlib              : link nothing we did not write.
-# /base:0x140000000          : fixed link base (lld-link's x64 default, made
-#                              explicit) so the debugger slide is
-#                              "load address" - 0x140000000.
-# Relocations (.reloc) are kept (/dynamicbase is the default): firmware loads
-# the image wherever it has free memory.
 LDFLAGS := /subsystem:efi_application /entry:efi_main /nodefaultlib \
            /machine:x64 /base:0x140000000
 
 ifeq ($(CONFIG),debug)
-  # -Og keeps variables inspectable; CodeView debug info goes to a PDB that
-  # stays out of the ESP.
   CFLAGS  += -Og -g -gcodeview -DBOOT_CONFIG_DEBUG
   LDFLAGS += /debug /pdb:$(BUILD)/BOOTX64.pdb
 else ifeq ($(CONFIG),balanced)
   CFLAGS  += -O2 -DBOOT_CONFIG_BALANCED
 else ifeq ($(CONFIG),release)
-  # -Os: size over speed (boot code is I/O- and firmware-bound, not CPU-bound).
-  # -flto + per-function sections + /opt:ref,icf: drop and fold unused code.
   CFLAGS  += -Os -flto -ffunction-sections -fdata-sections -DBOOT_CONFIG_RELEASE
   LDFLAGS += /opt:ref /opt:icf
 else
@@ -114,9 +66,6 @@ SRCS := src/firmware/uefi/entry.c \
         src/lib/mem.c
 OBJS := $(patsubst %,$(BUILD)/obj/%.obj,$(basename $(SRCS)))
 
-# --- test kernel (ELF, independent of CONFIG) -----------------------------
-# -mcmodel=kernel : code and data live in the top 2 GiB (sign-extended 32-bit
-#                   addresses), as the boot protocol requires.
 KBUILD  := build/kernel
 KERNEL  := $(KBUILD)/kernel.elf
 KCFLAGS := --target=x86_64-unknown-none-elf -std=c11 -ffreestanding -fno-pic \
@@ -124,7 +73,6 @@ KCFLAGS := --target=x86_64-unknown-none-elf -std=c11 -ffreestanding -fno-pic \
            -fno-asynchronous-unwind-tables -O2 -Wall -Wextra -Werror -Iinclude -MMD -MP
 KOBJS   := $(KBUILD)/kernel.o $(KBUILD)/mem.o
 
-# --- ISO (host tool, built with the host compiler and its C library) -------
 HOSTCC ?= gcc
 MKISO  := build/tools/mkiso.exe
 ISO    := $(BUILD)/myboot.iso
@@ -195,23 +143,12 @@ size:
 	done
 	@[ -f $(KERNEL) ] && printf '%-9s %7d bytes\n' kernel $$(wc -c < $(KERNEL)) || true
 
-# --- QEMU --------------------------------------------------------------------
-# The Windows QEMU installer ships OVMF as edk2-x86_64-code.fd. Every run
-# starts from a fresh copy of the NVRAM template: saved boot options from an
-# earlier run (e.g. a CD) otherwise make OVMF skip the disk under test.
 QEMU       ?= qemu-system-x86_64
 QEMU_SHARE ?= C:/Program Files/qemu/share
 QEMU_MEM   ?= 256M
-# CPUs: the test kernel releases every AP the loader parked and checks it arrives
 QEMU_SMP   ?= 4
 VARS       := build/vars.fd
 
-# -net none : skip OVMF's PXE attempts (saves seconds per test boot).
-# fat:DIR   : QEMU presents the ESP directory as a FAT disk. Read-only vvfat
-#             must sit on a device that supports read-only (virtio-blk); the
-#             default q35 AHCI disk fails with "Block node is read-only".
-# -serial stdio : OVMF mirrors ConOut to COM1, and the kernel writes COM1.
-# isa-debug-exit : lets the test kernel end QEMU with a status code.
 QEMU_ARGS = -machine q35 -m $(QEMU_MEM) -smp $(QEMU_SMP) -net none -no-reboot \
             -drive "if=pflash,format=raw,readonly=on,file=$(QEMU_SHARE)/edk2-x86_64-code.fd" \
             -drive if=pflash,format=raw,file=$(VARS) \
@@ -240,24 +177,17 @@ run-gdb: all
 	@$(FRESH_VARS)
 	"$(QEMU)" $(QEMU_ARGS) -s -S
 
-# The kernel exits QEMU with (0x10 << 1) | 1 = 33 when every check passed.
-# stdin is /dev/null: a stray byte on the serial console would stop the
-# BOOT.CFG menu countdown and wait for a choice forever.
 test: all
 	@$(FRESH_VARS)
 	@timeout 60 "$(QEMU)" $(QEMU_ARGS) -display none < /dev/null; code=$$?; \
 	if [ $$code -eq 33 ]; then echo "TEST PASS ($(CONFIG))"; \
 	else echo "TEST FAIL ($(CONFIG)): qemu exit $$code"; exit 1; fi
 
-# A small EFI program the scenarios chainload (tests/efi/chaintest.c).
 CHAINTEST := $(BUILD)/chaintest/CHAINTEST.EFI
 $(CHAINTEST): $(BUILD)/obj/tests/efi/chaintest.obj
 	@mkdir -p $(dir $@)
 	$(LD) /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 /out:$@ $<
 
-# LINUX_KERNEL / LINUX_INITRD: a Linux kernel with an EFI stub for the
-# Linux scenario; the default is the WSL kernel when installed. Skipped
-# when absent.
 LINUX_KERNEL ?= C:/Program Files/WSL/tools/kernel
 LINUX_INITRD ?= C:/Program Files/WSL/tools/initrd.img
 
@@ -266,10 +196,6 @@ test-all: all $(CHAINTEST)
 	  CHAINTEST="$(CHAINTEST)" LINUX_KERNEL="$(LINUX_KERNEL)" LINUX_INITRD="$(LINUX_INITRD)" \
 	  sh tests/run.sh
 
-# --- host tests of the filesystem drivers -------------------------------------
-# The driver (src/fs/) compiled for Windows, reading test images; tests/fs.py
-# compares every file with 7-Zip's extraction, tests/host/fuzz.py reads
-# corrupted images with AddressSanitizer and UBSan.
 PYTHON   ?= python
 FS_SRCS  := tests/host/ext4cat.c src/fs/ext4.c src/fs/fs.c
 FS_HOST  := build/host/ext4cat.exe
@@ -289,9 +215,6 @@ test-fs: $(FS_HOST) $(FS_ASAN) $(KERNEL)
 	LINUX_KERNEL="$(LINUX_KERNEL)" $(PYTHON) tests/fs.py
 	$(PYTHON) tests/host/fuzz.py $(FUZZ_RUNS)
 
-# --- host test of the CSME detection ------------------------------------------
-# src/csme/ compiled for Windows against a simulated HECI device: config
-# space, the HECI registers and an ME that answers (or does not).
 CSME_SRCS := tests/host/csmetest.c src/csme/csme.c
 CSME_HOST := build/host/csmetest.exe
 CSME_ASAN := build/host/csmetest-asan.exe
@@ -304,17 +227,12 @@ $(CSME_ASAN): $(CSME_SRCS) include/csme/csme.h include/bootinfo/bootinfo.h
 	@mkdir -p $(dir $@)
 	$(CC) $(FS_HOSTFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all $(CSME_SRCS) -o $@
 
-# The sanitizer runtime is a DLL next to clang's other libraries (found the
-# way tests/host/fuzz.py finds it: clang itself need not be on the shell's PATH).
 LLVM_DIR ?= C:/Program Files/LLVM
 test-csme: $(CSME_HOST) $(CSME_ASAN)
 	$(CSME_HOST)
 	for d in "$(LLVM_DIR)"/lib/clang/*/lib/windows; do PATH="$$(cygpath -u "$$d"):$$PATH"; done; \
 	$(CSME_ASAN)
 
-# --- host test of the JPEG decoder -------------------------------------------
-# src/image/jpeg.c compiled for Windows; tests/jpeg.py compares its output
-# with GDI+'s and fuzzes the AddressSanitizer build.
 JPEG_SRCS := tests/host/jpegdec.c src/image/jpeg.c
 JPEG_HOST := build/host/jpegdec.exe
 JPEG_ASAN := build/host/jpegdec-asan.exe

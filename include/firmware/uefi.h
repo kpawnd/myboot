@@ -1,26 +1,14 @@
-/*
- * Minimal hand-written UEFI 2.x definitions (x86-64 only).
- *
- * Only the types the bootloader actually uses are declared. Function slots we
- * do not call are typed as `void *` so the structure layout stays exact
- * without dragging in their prototypes. Every offset we rely on is checked
- * against the UEFI specification with a static assertion.
- *
- * Reference: UEFI Specification 2.10. Section numbers are given per type.
- */
+/* Minimal hand-written UEFI 2.x definitions (x86-64 only). */
 #ifndef FIRMWARE_UEFI_H
 #define FIRMWARE_UEFI_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* UEFI on x86-64 uses the Microsoft x64 calling convention. Our compile
- * target is already x86_64-windows, so this is the default, but it is stated
- * explicitly so the intent survives a change of target triple. */
 #define EFIAPI __attribute__((ms_abi))
 
 typedef uint64_t UINTN;
-typedef uint16_t CHAR16; /* UCS-2; L"" literals match with -fshort-wchar */
+typedef uint16_t CHAR16;
 typedef UINTN    EFI_STATUS;
 typedef void    *EFI_HANDLE;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -32,7 +20,6 @@ typedef struct {
     uint8_t  Data4[8];
 } EFI_GUID;
 
-/* Status codes (Appendix D). Errors have the top bit set. */
 #define EFI_ERROR_BIT          (1ULL << 63)
 #define EFI_ERROR(s)           (((s) & EFI_ERROR_BIT) != 0)
 #define EFI_SUCCESS            0ULL
@@ -46,25 +33,21 @@ typedef struct {
 #define EFI_VOLUME_CORRUPTED   (EFI_ERROR_BIT | 10)
 #define EFI_NOT_FOUND          (EFI_ERROR_BIT | 14)
 #define EFI_ABORTED            (EFI_ERROR_BIT | 21)
-/* Bit 62 marks statuses defined by the platform or OS rather than the
- * specification; the loader keeps its own filesystem errors there. */
 #define EFI_OEM_BIT            (1ULL << 62)
 
-/* 4.2 EFI_TABLE_HEADER */
 typedef struct {
     uint64_t Signature;
-    uint32_t Revision;   /* (major << 16) | minor; minor 70 means "x.7.0" */
-    uint32_t HeaderSize; /* bytes in the whole table, including this header */
+    uint32_t Revision;
+    uint32_t HeaderSize;
     uint32_t CRC32;
     uint32_t Reserved;
 } EFI_TABLE_HEADER;
 
-#define EFI_SYSTEM_TABLE_SIGNATURE 0x5453595320494249ULL /* "IBI SYST" */
-#define EFI_BOOT_SERVICES_SIGNATURE 0x56524553544F4F42ULL /* "BOOTSERV" */
+#define EFI_SYSTEM_TABLE_SIGNATURE 0x5453595320494249ULL
+#define EFI_BOOT_SERVICES_SIGNATURE 0x56524553544F4F42ULL
 
-/* 7.2 Memory allocation services */
 #define AllocateAnyPages   0u
-#define AllocateMaxAddress 1u /* *Memory in: highest acceptable address */
+#define AllocateMaxAddress 1u
 
 enum {
     EfiReservedMemoryType, EfiLoaderCode, EfiLoaderData, EfiBootServicesCode,
@@ -78,21 +61,17 @@ enum {
 #define EFI_MEMORY_MORE_RELIABLE (1ULL << 16)
 #define EFI_MEMORY_SP            (1ULL << 18)
 
-/* Firmware may return descriptors larger than this struct: always step
- * through the map by the DescriptorSize GetMemoryMap returns. */
 typedef struct {
     uint32_t Type;
     uint32_t Pad;
     uint64_t PhysicalStart;
     uint64_t VirtualStart;
-    uint64_t NumberOfPages; /* 4 KiB pages, regardless of CPU page size */
+    uint64_t NumberOfPages;
     uint64_t Attribute;
 } EFI_MEMORY_DESCRIPTOR;
 
-/* 7.1.8 RaiseTPL: TPL_HIGH_LEVEL masks every event, including the timer */
 #define TPL_HIGH_LEVEL 31
 
-/* 4.4 EFI_BOOT_SERVICES */
 typedef struct {
     EFI_TABLE_HEADER Hdr;
     UINTN (EFIAPI *RaiseTPL)(UINTN NewTpl);
@@ -152,7 +131,6 @@ typedef struct {
     void *CreateEventEx;
 } EFI_BOOT_SERVICES;
 
-/* 12.4 EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL */
 #define EFI_LIGHTGRAY            0x07
 #define EFI_LIGHTGREEN           0x0A
 #define EFI_LIGHTRED             0x0C
@@ -162,7 +140,7 @@ typedef struct {
 
 typedef struct {
     int32_t MaxMode;
-    int32_t Mode;          /* current text mode, for QueryMode */
+    int32_t Mode;
     int32_t Attribute;
     int32_t CursorColumn;
     int32_t CursorRow;
@@ -185,13 +163,11 @@ struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     SIMPLE_TEXT_OUTPUT_MODE *Mode;
 };
 
-/* 12.3 EFI_SIMPLE_TEXT_INPUT_PROTOCOL */
 typedef struct {
-    uint16_t ScanCode;    /* non-printing keys (arrows, F-keys); 0 otherwise */
-    CHAR16   UnicodeChar; /* 0 for non-printing keys */
+    uint16_t ScanCode;
+    CHAR16   UnicodeChar;
 } EFI_INPUT_KEY;
 
-/* EFI_INPUT_KEY.ScanCode values (Table 12-1) */
 #define SCAN_UP     0x01
 #define SCAN_DOWN   0x02
 #define SCAN_RIGHT  0x03
@@ -204,12 +180,10 @@ typedef struct {
 typedef struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
 struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
     EFI_STATUS (EFIAPI *Reset)(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, uint8_t ExtendedVerification);
-    /* EFI_NOT_READY when no key is waiting; never blocks. */
     EFI_STATUS (EFIAPI *ReadKeyStroke)(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key);
     void *WaitForKey;
 };
 
-/* 4.5 EFI_RUNTIME_SERVICES (8.2 variables, 8.5.1 ResetSystem) */
 #define EFI_VARIABLE_NON_VOLATILE       0x1
 #define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x2
 #define EFI_VARIABLE_RUNTIME_ACCESS     0x4
@@ -235,13 +209,11 @@ typedef struct {
                                void *ResetData);
 } EFI_RUNTIME_SERVICES;
 
-/* 4.6 EFI_CONFIGURATION_TABLE */
 typedef struct {
     EFI_GUID VendorGuid;
     void    *VendorTable;
 } EFI_CONFIGURATION_TABLE;
 
-/* 4.3 EFI_SYSTEM_TABLE */
 typedef struct {
     EFI_TABLE_HEADER                 Hdr;
     CHAR16                          *FirmwareVendor;
@@ -258,12 +230,11 @@ typedef struct {
     EFI_CONFIGURATION_TABLE         *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
-/* 9.1 EFI_LOADED_IMAGE_PROTOCOL */
 typedef struct {
     uint32_t          Revision;
     EFI_HANDLE        ParentHandle;
     EFI_SYSTEM_TABLE *SystemTable;
-    EFI_HANDLE        DeviceHandle; /* the volume we were loaded from */
+    EFI_HANDLE        DeviceHandle;
     void             *FilePath;
     void             *Reserved;
     uint32_t          LoadOptionsSize;
@@ -275,7 +246,6 @@ typedef struct {
     void             *Unload;
 } EFI_LOADED_IMAGE_PROTOCOL;
 
-/* 13.5 EFI_FILE_PROTOCOL */
 #define EFI_FILE_MODE_READ 1ULL
 
 typedef struct EFI_FILE_PROTOCOL EFI_FILE_PROTOCOL;
@@ -294,7 +264,6 @@ struct EFI_FILE_PROTOCOL {
     void *Flush;
 };
 
-/* 13.4 EFI_SIMPLE_FILE_SYSTEM_PROTOCOL */
 typedef struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
 struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
     uint64_t Revision;
@@ -302,7 +271,6 @@ struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
                                     EFI_FILE_PROTOCOL **Root);
 };
 
-/* 12.9 EFI_GRAPHICS_OUTPUT_PROTOCOL */
 enum {
     PixelRedGreenBlueReserved8BitPerColor,
     PixelBlueGreenRedReserved8BitPerColor,
@@ -320,7 +288,7 @@ typedef struct {
     uint32_t          VerticalResolution;
     uint32_t          PixelFormat;
     EFI_PIXEL_BITMASK PixelInformation;
-    uint32_t          PixelsPerScanLine; /* pixels are always 32 bits */
+    uint32_t          PixelsPerScanLine;
 } EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
 
 typedef struct {
@@ -332,8 +300,6 @@ typedef struct {
     UINTN                                 FrameBufferSize;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
 
-/* Blt pixels are always blue, green, red, reserved in memory: 0x00RRGGBB
- * as a little-endian uint32_t, whatever the framebuffer's own format. */
 typedef uint32_t EFI_GRAPHICS_OUTPUT_BLT_PIXEL;
 enum {
     EfiBltVideoFill,
@@ -346,7 +312,6 @@ typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL EFI_GRAPHICS_OUTPUT_PROTOCOL;
 struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
     void                              *QueryMode;
     void                              *SetMode;
-    /* Delta: bytes per row of BltBuffer; 0 means Width * 4. */
     EFI_STATUS (EFIAPI *Blt)(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
                              EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer, uint32_t BltOperation,
                              UINTN SourceX, UINTN SourceY, UINTN DestinationX,
@@ -354,12 +319,11 @@ struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
 };
 
-/* 13.9 EFI_BLOCK_IO_PROTOCOL (only the fields we read) */
 typedef struct {
     uint32_t MediaId;
     uint8_t  RemovableMedia;
     uint8_t  MediaPresent;
-    uint8_t  LogicalPartition; /* 1: this handle is a partition, not a disk */
+    uint8_t  LogicalPartition;
     uint8_t  ReadOnly;
     uint8_t  WriteCaching;
     uint32_t BlockSize;
@@ -372,7 +336,6 @@ typedef struct {
     EFI_BLOCK_IO_MEDIA *Media;
 } EFI_BLOCK_IO_PROTOCOL;
 
-/* 13.7 EFI_DISK_IO_PROTOCOL: byte-addressed reads on top of Block I/O */
 typedef struct EFI_DISK_IO_PROTOCOL EFI_DISK_IO_PROTOCOL;
 struct EFI_DISK_IO_PROTOCOL {
     uint64_t Revision;
@@ -381,8 +344,6 @@ struct EFI_DISK_IO_PROTOCOL {
     void *WriteDisk;
 };
 
-/* 10.2-10.3 Device path nodes: a byte stream of {type, subtype, length16}
- * headers. Nodes are not aligned, so fields are read byte-wise. */
 #define DP_TYPE_MESSAGING 0x03
 #define DP_TYPE_MEDIA     0x04
 #define DP_TYPE_END       0x7F
@@ -400,18 +361,15 @@ struct EFI_DISK_IO_PROTOCOL {
 #define DP_MEDIA_FILEPATH 0x04
 #define DP_END_ENTIRE     0xFF
 
-/* 2.4.1 InstallProtocolInterface, 7.3.15 LocateHandleBuffer */
 #define EFI_NATIVE_INTERFACE 0u
 #define ByProtocol           2u
 
-/* 13.2 EFI_LOAD_FILE2_PROTOCOL: how Linux 5.8+ fetches its initrd */
 typedef struct EFI_LOAD_FILE2_PROTOCOL EFI_LOAD_FILE2_PROTOCOL;
 struct EFI_LOAD_FILE2_PROTOCOL {
     EFI_STATUS (EFIAPI *LoadFile)(EFI_LOAD_FILE2_PROTOCOL *This, void *FilePath,
                                   uint8_t BootPolicy, UINTN *BufferSize, void *Buffer);
 };
 
-/* Layout verification against the specification (x86-64, 8-byte pointers). */
 _Static_assert(sizeof(EFI_GUID) == 16, "EFI_GUID size");
 _Static_assert(sizeof(EFI_TABLE_HEADER) == 24, "EFI_TABLE_HEADER size");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, FirmwareVendor) == 24, "ST.FirmwareVendor");

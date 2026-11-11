@@ -1,11 +1,4 @@
-/*
- * ELF64 validation (System V gABI, x86-64 psABI).
- *
- * Everything in the file is untrusted. Each check below guards a later
- * operation: sizes bound the reads, address checks bound the page-table
- * mappings, and every addition is checked for wrap-around before use.
- * Section headers are never read: only PT_LOAD matters for execution.
- */
+/* ELF64 validation (System V gABI, x86-64 psABI). */
 #include <stdbool.h>
 #include "core/util.h"
 #include "elf/elf.h"
@@ -17,7 +10,6 @@
 #define ET_EXEC     2u
 #define EM_X86_64   62u
 
-/* Elf64_Ehdr / Elf64_Phdr field offsets. */
 #define E_TYPE      16
 #define E_MACHINE   18
 #define E_VERSION   20
@@ -34,18 +26,17 @@
 #define P_MEMSZ     40
 #define P_ALIGN     48
 
-/* Highest address whose page-rounded end still fits in 64 bits. */
 #define VADDR_END_MAX 0xFFFFFFFFFFFFF000ULL
 
 static enum elf_error check_ident(const uint8_t *h)
 {
     if (h[0] != 0x7F || h[1] != 'E' || h[2] != 'L' || h[3] != 'F')
         return ELF_ERR_MAGIC;
-    if (h[4] != 2) /* ELFCLASS64 */
+    if (h[4] != 2)
         return ELF_ERR_CLASS;
-    if (h[5] != 1) /* ELFDATA2LSB */
+    if (h[5] != 1)
         return ELF_ERR_ENDIAN;
-    if (h[6] != 1 || rd32(h + E_VERSION) != 1) /* EV_CURRENT */
+    if (h[6] != 1 || rd32(h + E_VERSION) != 1)
         return ELF_ERR_VERSION;
     if (rd16(h + E_TYPE) != ET_EXEC)
         return ELF_ERR_TYPE;
@@ -66,7 +57,7 @@ static enum elf_error add_segment(struct elf_image *img, const uint8_t *ph, uint
     s.flags = rd32(ph + P_FLAGS);
 
     if (s.memsz == 0)
-        return ELF_OK; /* occupies nothing; ignore */
+        return ELF_OK;
     if (s.filesz > s.memsz)
         return ELF_ERR_SEG_SIZE;
     if (s.offset > file_size || s.filesz > file_size - s.offset)
@@ -81,8 +72,6 @@ static enum elf_error add_segment(struct elf_image *img, const uint8_t *ph, uint
     }
     if (img->nseg) {
         const struct elf_segment *prev = &img->seg[img->nseg - 1];
-        /* The gABI requires ascending p_vaddr; overlap would make two
-         * segments write the same bytes. Sharing a page is allowed. */
         if (s.vaddr < prev->vaddr + prev->memsz)
             return ELF_ERR_SEG_ORDER;
     }

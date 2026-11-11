@@ -1,17 +1,11 @@
-/*
- * ACPI 6.5 section 5.2.5 (RSDP) and 5.2.6-5.2.8 (SDT header, RSDT, XSDT).
- *
- * Validation order matters: a range is checked against the memory map
- * before it is read, and a length field is bounded before it is used to
- * size the next read.
- */
+/* ACPI 6.5 section 5.2.5 (RSDP) and 5.2.6-5.2.8 (SDT header, RSDT, XSDT). */
 #include "acpi/acpi.h"
 #include "lib/mem.h"
 
 #define RSDP_V1_LEN   20u
 #define RSDP_V2_LEN   36u
 #define SDT_HDR_LEN   36u
-#define SDT_MAX_LEN   KiB(64) /* thousands of tables; anything larger is corrupt */
+#define SDT_MAX_LEN   KiB(64)
 
 static uint8_t sum8(const uint8_t *p, uint64_t n)
 {
@@ -49,7 +43,7 @@ enum acpi_error acpi_parse(uint64_t rsdp, phys_range_ok_fn ok, struct acpi_info 
         return ACPI_ERR_ADDR;
     if (memcmp(p, "RSD PTR ", 8) != 0)
         return ACPI_ERR_SIG;
-    if (sum8(p, RSDP_V1_LEN) != 0) /* v1 checksum covers the first 20 bytes */
+    if (sum8(p, RSDP_V1_LEN) != 0)
         return ACPI_ERR_CHECKSUM;
 
     out->revision = p[15];
@@ -61,7 +55,7 @@ enum acpi_error acpi_parse(uint64_t rsdp, phys_range_ok_fn ok, struct acpi_info 
             return ACPI_ERR_LENGTH;
         if (!ok(rsdp, len))
             return ACPI_ERR_ADDR;
-        if (sum8(p, len) != 0) /* extended checksum covers the whole RSDP */
+        if (sum8(p, len) != 0)
             return ACPI_ERR_CHECKSUM;
         sdt = rd64(p + 24);
     }

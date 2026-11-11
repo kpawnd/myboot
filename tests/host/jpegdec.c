@@ -1,13 +1,3 @@
-/*
- * Host test for src/image/jpeg.c: decodes a JPEG file with the loader's
- * own decoder, so tests/jpeg.py can compare the pixels with what an
- * independent decoder (Windows GDI+) makes of the same file.
- *
- *   jpegdec IN.JPG [OUT.PPM]
- *
- * Prints "WIDTHxHEIGHT" and writes the picture as binary PPM, or prints
- * "ERROR <reason>" and exits 1. Exit codes above 1 are harness failures.
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include "image/jpeg.h"
@@ -25,7 +15,6 @@ int main(int argc, char **argv)
     fseek(f, 0, SEEK_END);
     len = ftell(f);
     fseek(f, 0, SEEK_SET);
-    /* exactly len bytes: AddressSanitizer catches any read past the end */
     if (!(data = malloc(len ? (size_t)len : 1)) || fread(data, 1, (size_t)len, f) != (size_t)len)
         return 2;
     fclose(f);
@@ -34,7 +23,6 @@ int main(int argc, char **argv)
         printf("ERROR %s\n", jpeg_strerror(e));
         return 1;
     }
-    /* stride w + 3: the decoder must not touch the columns past the picture */
     if (!(px = malloc((size_t)(w + 3) * h * sizeof(*px))))
         return 2;
     for (size_t i = 0; i < (size_t)(w + 3) * h; i++)

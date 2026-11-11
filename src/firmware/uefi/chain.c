@@ -1,24 +1,3 @@
-/*
- * Starting other EFI programs: Linux kernels through their EFI stub, and
- * anything else (Windows Boot Manager, another loader, a UEFI shell).
- *
- * The image file is read by us (one read, counted, progress shown) and
- * handed to the firmware's LoadImage together with its device path, so the
- * started program sees a normal LoadedImage: DeviceHandle is its volume
- * (Windows Boot Manager finds its BCD store through it) and FilePath its
- * path. The firmware relocates the image and, with Secure Boot on,
- * verifies its signature.
- *
- * Linux: the command line goes into LoadOptions as UTF-16. Initrds are
- * served by a LoadFile2 protocol on a vendor media device path with
- * LINUX_EFI_INITRD_MEDIA_GUID, the interface the EFI stub queries since
- * Linux 5.8 (also used by systemd-boot). The stub copies the data into its
- * own memory, so several initrds are simply concatenated, each padded to
- * 4 bytes as cpio requires.
- *
- * StartImage does not return on success: Linux exits boot services itself,
- * and so does Windows. If it does return, everything is undone.
- */
 #include "firmware/uefi_boot.h"
 #include "firmware/uefi_console.h"
 #include "core/util.h"
@@ -30,8 +9,6 @@
 static EFI_GUID guid_devpath = {0x09576E91, 0x6D3F, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static EFI_GUID guid_load_file2 = {0x4006C0C1, 0xFCB3, 0x403E, {0x99, 0x6D, 0x4A, 0x6C, 0x87, 0x24, 0xE0, 0x6D}};
 
-/* ---- initrd service ------------------------------------------------------ */
-
 struct initrd_part {
     uint64_t phys;
     uint64_t pages;
@@ -40,10 +17,9 @@ struct initrd_part {
 
 static struct initrd_part g_initrd[CFG_MAX_MODULES];
 static uint32_t g_ninitrd;
-static uint64_t g_initrd_total; /* bytes served, parts padded to 4 */
+static uint64_t g_initrd_total;
 static EFI_HANDLE g_initrd_handle;
 
-/* VenMedia(LINUX_EFI_INITRD_MEDIA_GUID)/End: what the stub looks up. */
 static const struct __attribute__((packed)) {
     uint8_t  type, subtype;
     uint16_t length;
@@ -95,9 +71,6 @@ static void initrd_release(void)
     g_initrd_total = 0;
 }
 
-/* ---- file helpers -------------------------------------------------------- */
-
-/* Whole file into fresh pages. Progress line and errors included. */
 static EFI_STATUS read_file(struct uefi_vol *vol, const CHAR16 *what, const char *path,
                             uint64_t *phys, uint64_t *pages, uint64_t *size)
 {
@@ -138,8 +111,6 @@ static EFI_STATUS read_file(struct uefi_vol *vol, const CHAR16 *what, const char
     return EFI_SUCCESS;
 }
 
-/* Device path of `vol` followed by a file path node for `path`, in a
- * static buffer. NULL if the volume has no device path or it is too long. */
 static void *file_device_path(EFI_HANDLE vol, const char *path)
 {
     static uint8_t buf[DEVPATH_MAX];
@@ -166,7 +137,7 @@ static void *file_device_path(EFI_HANDLE vol, const char *path)
     buf[n + 1] = DP_MEDIA_FILEPATH;
     memcpy(buf + n + 2, &len, 2);
     for (size_t i = 0; i <= plen; i++) {
-        uint16_t c = path[i] == '/' ? 0x5C : (uint8_t)path[i]; /* firmware paths use backslashes */
+        uint16_t c = path[i] == '/' ? 0x5C : (uint8_t)path[i];
         memcpy(buf + n + 4 + 2 * i, &c, 2);
     }
     n += len;
@@ -176,8 +147,6 @@ static void *file_device_path(EFI_HANDLE vol, const char *path)
     buf[n + 3] = 0;
     return buf;
 }
-
-/* ---- boot ---------------------------------------------------------------- */
 
 EFI_STATUS chain_boot(const struct cfg_entry *e, struct uefi_vol *vol, const char *cmdline,
                       uint32_t cmdline_len, bool *started)
@@ -229,7 +198,7 @@ EFI_STATUS chain_boot(const struct cfg_entry *e, struct uefi_vol *vol, const cha
 
     dp = file_device_path(vol->handle, path);
     s = g_uefi.bs->LoadImage(0, g_uefi.image, dp, (void *)(uintptr_t)img, img_size, &child);
-    g_uefi.bs->FreePages(img, img_pages); /* LoadImage made its own copy */
+    g_uefi.bs->FreePages(img, img_pages);
     img_pages = 0;
     if (EFI_ERROR(s)) {
         boot_error(is_linux ? L"firmware cannot load this kernel (no EFI stub?)"
@@ -256,7 +225,7 @@ EFI_STATUS chain_boot(const struct cfg_entry *e, struct uefi_vol *vol, const cha
     blog_end(TAG_INFO);
     *started = true;
     s = g_uefi.bs->StartImage(child, NULL, NULL);
-    child = NULL; /* an application that returned has been unloaded */
+    child = NULL;
     boot_error(is_linux ? L"Linux returned to the loader" : L"the EFI program returned to the loader",
                path, EFI_ERROR(s) ? s : 0);
     if (!EFI_ERROR(s))
@@ -270,8 +239,6 @@ out:
     initrd_release();
     return s;
 }
-
-/* ---- Windows detection -------------------------------------------------- */
 
 static bool ends_with_ci(const char *s, const char *tail)
 {
@@ -306,7 +273,7 @@ void chain_add_windows(struct boot_config *c)
     done = true;
     for (uint32_t i = 0; i < c->nentries; i++)
         if (c->entry[i].type == CFG_EFI && ends_with_ci(c->entry[i].kernel, "bootmgfw.efi"))
-            return; /* the config already has one */
+            return;
     n = vol_list(&vols);
     for (uint32_t i = 0; i < n; i++) {
         struct kfile f = {0};

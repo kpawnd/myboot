@@ -1,138 +1,47 @@
-/*
- * MYBOOT boot protocol, version 3: the contract between loader and kernel.
- *
- * This header is shared by the loader and the kernel and is the only
- * definition of the ABI. Every field has an explicit width and a fixed
- * offset that is verified below, so the layout does not depend on compiler
- * packing rules. Little-endian throughout (x86-64).
- *
- * Kernel requirements
- *   ELF64, ET_EXEC, EM_X86_64, every PT_LOAD at a virtual address
- *   >= BOOT_KERNEL_VMIN (the top 2 GiB; link with -mcmodel=kernel).
- *   p_paddr is ignored: the loader chooses the physical location, keeping
- *   the whole image physically contiguous (phys = virt - kernel_virt_base +
- *   kernel_phys_base) and honouring p_align up to 2 MiB.
- *   Loaded from the path \EFI\MYBOOT\BOOT.CFG names (include/config/config.h),
- *   or from \EFI\MYBOOT\KERNEL.ELF when there is no BOOT.CFG.
- *
- * Compatibility
- *   Fields are only ever appended. `size` is how many bytes of boot_info the
- *   loader filled: check that it covers a field before reading it. `version`
- *   changes only for an incompatible change, which a kernel must reject.
- *
- * Machine state at kernel entry
- *   64-bit long mode, CPL 0, interrupts disabled, no IDT loaded (install one
- *   before enabling interrupts).
- *   CR0.PG, CR0.WP and CR4.PAE set; EFER.NXE set iff BOOT_F_NX.
- *   CR4.LA57 is left as firmware set it; BOOT_F_LA57 says which.
- *   IA32_PAT = boot_info.pat, Linux's layout: entry 0 WB, 1 WC, 2 UC-,
- *   3 UC, 4 WB, 5 WP, 6 UC-, 7 WT. PWT alone in a PTE selects WC.
- *   GDT: 0x08 = 64-bit code, 0x10 = data; CS = 0x08, DS/ES/SS/FS/GS = 0x10.
- *   RDI = virtual address of struct boot_info (inside the HHDM).
- *   RSP = top of a 64 KiB stack minus 8 (aligned as just after a CALL);
- *   [RSP] = 0 as a fake return address. RBP = 0.
- *   SSE enabled: CR0.EM clear, CR0.MP and CR0.NE set, CR4.OSFXSR and
- *   CR4.OSXMMEXCPT set. With XSAVE, CR4.OSXSAVE set and XCR0 =
- *   boot_info.xcr0 (x87, SSE, and AVX and AVX-512 where the CPU has them);
- *   xsave_size is the XSAVE area those need. Register contents are
- *   undefined: FNINIT and clear what you use.
- *
- * Address space at kernel entry
- *   Kernel PT_LOAD segments at their p_vaddr with 4 KiB pages:
- *     writable iff PF_W, executable iff PF_X (NX used when BOOT_F_NX).
- *   HHDM: physical [0, hhdm_size) mapped read/write, non-executable, at
- *     hhdm_base, using 1 GiB pages (BOOT_F_HHDM_1G) or 2 MiB pages.
- *     hhdm_size reaches the end of the highest RAM-backed entry (usable,
- *     reclaimable, ACPI, runtime, kernel, persistent), rounded up to the
- *     page size used. Reserved and MMIO ranges below that point are
- *     covered incidentally; above it (PCI holes, framebuffers, high
- *     reserved windows) they are not mapped. Map those yourself.
- *     Cacheability comes from the firmware's MTRRs.
- *   Framebuffer (if present): mapped read/write, non-executable, at
- *     hhdm_base + framebuffer.base, even when above hhdm_size. The part
- *     beyond hhdm_size is write-combining (PWT set: PAT entry 1), and
- *     BOOT_F_FB_WC says the whole framebuffer is. Inside the HHDM it keeps
- *     the HHDM's attributes, which the firmware's MTRRs usually make UC.
- *   One identity-mapped executable 8 KiB window holding the loader's
- *   handoff code, and, with application processors parked, the 4 KiB
- *   AP trampoline page (read-only, executable) they spin in. Nothing else.
- *   The kernel should build its own tables, keeping the trampoline page
- *   mapped until every parked AP has been released.
- *
- * Application processors (SMP)
- *   smp_cpus lists every enabled CPU of the ACPI MADT, the BSP first.
- *   Each AP the loader could start is BOOT_SMP_PARKED: in 64-bit mode on
- *   the kernel's page tables, with the same CR0, EFER, PAT and XCR0 as the
- *   BSP and CR4 = PAE, OSFXSR, OSXMMEXCPT, plus OSXSAVE and LA57 when the
- *   BSP has them; interrupts off; GDT as below; RSP = stack_top. It spins
- *   on goto_address. Write a kernel virtual address there (after anything
- *   in extra_argument) and the AP jumps to it with RDI = the virtual (HHDM)
- *   address of its boot_smp_cpu and [RSP] = 0 as a fake return address.
- *   The 16 KiB AP stacks are BOOTLOADER_RECLAIMABLE: switch away from them
- *   before reclaiming.
- *
- * Pointers inside boot_info are PHYSICAL addresses (0 = absent); add
- * hhdm_base to dereference them. All referenced memory lies in entries of
- * type BOOT_MEM_BOOTLOADER_RECLAIMABLE, except module contents
- * (BOOT_MEM_MODULE) and firmware tables (ACPI, SMBIOS, the UEFI system
- * table), which stay where firmware put them.
- *
- * UEFI runtime services
- *   efi_mmap is the firmware's own final memory map, exactly as
- *   GetMemoryMap returned it before ExitBootServices (the kernel and modules
- *   appear in it as EfiLoaderData). To call runtime services from the
- *   kernel's own page tables, fill in VirtualStart of each descriptor with
- *   EFI_MEMORY_RUNTIME set and pass this array to SetVirtualAddressMap. It is
- *   in writable HHDM memory for that purpose.
- */
+/* MYBOOT boot protocol, version 3: the contract between loader and kernel. */
 #ifndef BOOTINFO_BOOTINFO_H
 #define BOOTINFO_BOOTINFO_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#define BOOT_INFO_MAGIC   0x4942544F4F42594DULL /* "MYBOOTBI" little-endian */
-#define BOOT_INFO_VERSION 3u /* 2: boot_info.csme; 3: PAT, XCR0, SMP */
+#define BOOT_INFO_MAGIC   0x4942544F4F42594DULL
+#define BOOT_INFO_VERSION 3u
 
 #define BOOT_HHDM_BASE    0xFFFF800000000000ULL
 #define BOOT_KERNEL_VMIN  0xFFFFFFFF80000000ULL
 
-/* boot_info.flags */
-#define BOOT_F_UEFI    (1u << 0) /* booted through UEFI (else legacy BIOS) */
-#define BOOT_F_LA57    (1u << 1) /* 5-level paging active; CR3 is a PML5 */
-#define BOOT_F_NX      (1u << 2) /* EFER.NXE set; NX bits in use */
-#define BOOT_F_HHDM_1G (1u << 3) /* HHDM built from 1 GiB pages */
-#define BOOT_F_FB_WC   (1u << 4) /* the whole framebuffer is mapped write-combining */
+#define BOOT_F_UEFI    (1u << 0)
+#define BOOT_F_LA57    (1u << 1)
+#define BOOT_F_NX      (1u << 2)
+#define BOOT_F_HHDM_1G (1u << 3)
+#define BOOT_F_FB_WC   (1u << 4)
 
-/* boot_mem_entry.type. Entries are sorted by base, non-overlapping, 4 KiB
- * aligned, and adjacent entries of equal type and flags are merged. */
 enum boot_mem_type {
-    BOOT_MEM_USABLE = 1,                 /* free RAM */
-    BOOT_MEM_RESERVED = 2,               /* never touch */
-    BOOT_MEM_ACPI_RECLAIMABLE = 3,       /* free once ACPI tables are parsed */
-    BOOT_MEM_ACPI_NVS = 4,               /* firmware-owned, must preserve */
-    BOOT_MEM_BAD = 5,                    /* faulty RAM */
-    BOOT_MEM_BOOTLOADER_RECLAIMABLE = 6, /* boot_info, our stack/tables, loader image */
-    BOOT_MEM_KERNEL = 7,                 /* the loaded kernel image */
-    BOOT_MEM_FIRMWARE_RUNTIME = 8,       /* UEFI runtime services code/data */
-    BOOT_MEM_MMIO = 9,                   /* firmware-declared MMIO */
-    BOOT_MEM_PERSISTENT = 10,            /* NVDIMM / persistent memory */
-    BOOT_MEM_MODULE = 11                 /* module contents; free once consumed */
+    BOOT_MEM_USABLE = 1,
+    BOOT_MEM_RESERVED = 2,
+    BOOT_MEM_ACPI_RECLAIMABLE = 3,
+    BOOT_MEM_ACPI_NVS = 4,
+    BOOT_MEM_BAD = 5,
+    BOOT_MEM_BOOTLOADER_RECLAIMABLE = 6,
+    BOOT_MEM_KERNEL = 7,
+    BOOT_MEM_FIRMWARE_RUNTIME = 8,
+    BOOT_MEM_MMIO = 9,
+    BOOT_MEM_PERSISTENT = 10,
+    BOOT_MEM_MODULE = 11
 };
 
-/* boot_mem_entry.flags */
 #define BOOT_MEM_F_NONVOLATILE      (1u << 0)
 #define BOOT_MEM_F_MORE_RELIABLE    (1u << 1)
-#define BOOT_MEM_F_SPECIFIC_PURPOSE (1u << 2) /* e.g. HBM; usable but special */
+#define BOOT_MEM_F_SPECIFIC_PURPOSE (1u << 2)
 
 struct boot_mem_entry {
-    uint64_t base;   /* physical, 4 KiB aligned */
-    uint64_t length; /* bytes, multiple of 4 KiB, never 0 */
-    uint32_t type;   /* enum boot_mem_type */
-    uint32_t flags;  /* BOOT_MEM_F_* */
+    uint64_t base;
+    uint64_t length;
+    uint32_t type;
+    uint32_t flags;
 };
 
-/* boot_cpu.features */
 #define BOOT_CPU_FPU           (1ull << 0)
 #define BOOT_CPU_TSC           (1ull << 1)
 #define BOOT_CPU_APIC          (1ull << 2)
@@ -160,42 +69,39 @@ struct boot_mem_entry {
 #define BOOT_CPU_SHA           (1ull << 24)
 #define BOOT_CPU_HYPERVISOR    (1ull << 25)
 
-/* boot_cpu.tsc_source: where tsc_hz came from */
 enum boot_tsc_source {
-    BOOT_TSC_UNKNOWN = 0,    /* tsc_hz is 0 */
-    BOOT_TSC_CPUID_15H = 1,  /* crystal ratio: exact */
-    BOOT_TSC_CPUID_16H = 2,  /* nominal base MHz: approximate */
-    BOOT_TSC_HYPERVISOR = 3, /* hypervisor leaf 0x40000010 */
-    BOOT_TSC_CALIBRATED = 4  /* measured against a firmware delay */
+    BOOT_TSC_UNKNOWN = 0,
+    BOOT_TSC_CPUID_15H = 1,
+    BOOT_TSC_CPUID_16H = 2,
+    BOOT_TSC_HYPERVISOR = 3,
+    BOOT_TSC_CALIBRATED = 4
 };
 
-/* Strings are ASCII, NUL-padded, not necessarily NUL-terminated. */
 struct boot_cpu {
-    char     vendor[12];          /* CPUID 0, e.g. "GenuineIntel" */
-    char     hypervisor[12];      /* CPUID 0x40000000, empty on bare metal */
-    char     brand[48];           /* CPUID 0x80000002-4, leading spaces removed */
-    uint32_t family;              /* display family (base + extended) */
-    uint32_t model;               /* display model (with extended model) */
+    char     vendor[12];
+    char     hypervisor[12];
+    char     brand[48];
+    uint32_t family;
+    uint32_t model;
     uint32_t stepping;
-    uint32_t bsp_apic_id;         /* x2APIC ID when available, else xAPIC ID */
-    uint64_t features;            /* BOOT_CPU_* */
-    uint64_t tsc_hz;              /* 0 if unknown */
-    uint32_t tsc_source;          /* enum boot_tsc_source */
-    uint16_t threads_per_core;    /* 0 if unknown */
-    uint16_t logical_per_package; /* 0 if unknown */
+    uint32_t bsp_apic_id;
+    uint64_t features;
+    uint64_t tsc_hz;
+    uint32_t tsc_source;
+    uint16_t threads_per_core;
+    uint16_t logical_per_package;
     uint8_t  phys_addr_bits;
     uint8_t  virt_addr_bits;
     uint8_t  reserved[6];
 };
 
-/* Linear 32-bit-per-pixel framebuffer. base == 0 means none. */
 struct boot_framebuffer {
-    uint64_t base;   /* physical */
-    uint64_t size;   /* bytes */
-    uint32_t width;  /* pixels */
-    uint32_t height; /* pixels */
-    uint32_t pitch;  /* bytes per scanline */
-    uint32_t bpp;    /* always 32 in version 1 */
+    uint64_t base;
+    uint64_t size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t bpp;
     uint8_t  red_shift, red_size;
     uint8_t  green_shift, green_size;
     uint8_t  blue_shift, blue_size;
@@ -203,7 +109,7 @@ struct boot_framebuffer {
 };
 
 enum boot_dev_interface {
-    BOOT_DEV_UNKNOWN = 0, /* includes virtio and controllers with no path node */
+    BOOT_DEV_UNKNOWN = 0,
     BOOT_DEV_NVME = 1,
     BOOT_DEV_SATA = 2,
     BOOT_DEV_USB = 3,
@@ -215,151 +121,135 @@ enum boot_dev_interface {
 
 enum boot_part_scheme { BOOT_PART_NONE = 0, BOOT_PART_MBR = 1, BOOT_PART_GPT = 2 };
 
-/* The volume the loader (and kernel) was read from. */
 struct boot_device {
-    uint32_t interface;           /* enum boot_dev_interface */
-    uint8_t  partition_scheme;    /* enum boot_part_scheme */
-    uint8_t  removable;           /* 1 if firmware reports removable media */
+    uint32_t interface;
+    uint8_t  partition_scheme;
+    uint8_t  removable;
     uint16_t reserved;
-    uint32_t partition_number;    /* 1-based, 0 if unknown */
-    uint32_t block_size;          /* bytes per logical block, 0 if unknown */
+    uint32_t partition_number;
+    uint32_t block_size;
     uint64_t partition_start_lba;
     uint64_t partition_lba_count;
-    uint8_t  partition_guid[16];  /* GPT unique partition GUID, or MBR signature */
+    uint8_t  partition_guid[16];
 };
 
-/* Intel CSME (Converged Security and Management Engine), seen through its
- * host interface HECI1 at PCI 00:16.0. vendor_id == 0 when no HECI device
- * was visible: not an Intel CPU, the ME fused off, or HECI hidden by the
- * firmware. The loader cannot tell those apart. */
-#define BOOT_CSME_PRESENT       (1u << 0) /* vendor_id, device_id, hfsts[] are valid */
-#define BOOT_CSME_INIT_COMPLETE (1u << 1) /* HFSTS1 bit 9 */
-#define BOOT_CSME_VERSION_VALID (1u << 2) /* fw_*: from whichever query answered first */
+#define BOOT_CSME_PRESENT       (1u << 0)
+#define BOOT_CSME_INIT_COMPLETE (1u << 1)
+#define BOOT_CSME_VERSION_VALID (1u << 2)
 
-/* boot_csme.version_status, hbm_status, mkhi_status: how each exchange with
- * the CSME went */
 enum boot_csme_status {
-    BOOT_CSME_ST_NONE = 0,       /* not attempted: no CSME, or built without the query */
+    BOOT_CSME_ST_NONE = 0,
     BOOT_CSME_ST_OK = 1,
-    BOOT_CSME_ST_NOT_NORMAL = 2, /* CSME not in normal state and mode: not asked */
-    BOOT_CSME_ST_NO_BAR = 3,     /* firmware assigned HECI no memory BAR */
-    BOOT_CSME_ST_NOT_READY = 4,  /* HECI link not ready on both sides */
-    BOOT_CSME_ST_BUSY = 5,       /* HECI buffers not empty: another message in flight */
-    BOOT_CSME_ST_TIMEOUT = 6,    /* no reply within 1 s */
-    BOOT_CSME_ST_BAD_REPLY = 7,  /* reply malformed or for another request */
-    BOOT_CSME_ST_REFUSED = 8     /* result or status code not 0 */
+    BOOT_CSME_ST_NOT_NORMAL = 2,
+    BOOT_CSME_ST_NO_BAR = 3,
+    BOOT_CSME_ST_NOT_READY = 4,
+    BOOT_CSME_ST_BUSY = 5,
+    BOOT_CSME_ST_TIMEOUT = 6,
+    BOOT_CSME_ST_BAD_REPLY = 7,
+    BOOT_CSME_ST_REFUSED = 8
 };
 
 struct boot_csme {
-    uint16_t vendor_id;      /* 0x8086, or 0 if no HECI device */
-    uint16_t device_id;      /* HECI1 device ID: identifies the chipset */
-    uint32_t flags;          /* BOOT_CSME_* */
-    uint32_t hfsts[6];       /* raw firmware status registers HFSTS1-6 */
-    uint16_t fw_major;       /* firmware version major.minor.hotfix.build, */
-    uint16_t fw_minor;       /* as Intel tools and Linux fw_ver print it */
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint32_t flags;
+    uint32_t hfsts[6];
+    uint16_t fw_major;
+    uint16_t fw_minor;
     uint16_t fw_hotfix;
     uint16_t fw_build;
-    uint8_t  revision_id;    /* PCI revision of HECI1 */
-    uint8_t  working_state;  /* HFSTS1[3:0]: 5 = normal */
-    uint8_t  op_mode;        /* HFSTS1[19:16]: 0 = normal */
-    uint8_t  error_code;     /* HFSTS1[15:12]: 0 = none */
-    uint8_t  version_status; /* enum boot_csme_status: MKHI at its fixed address */
-    uint8_t  hbm_status;     /* enum boot_csme_status: the HBM session */
-    uint8_t  mkhi_status;    /* enum boot_csme_status: MKHI through HBM; NONE if no such client */
-    uint8_t  client_count;   /* ME clients the HBM session enumerated (saturates at 255) */
+    uint8_t  revision_id;
+    uint8_t  working_state;
+    uint8_t  op_mode;
+    uint8_t  error_code;
+    uint8_t  version_status;
+    uint8_t  hbm_status;
+    uint8_t  mkhi_status;
+    uint8_t  client_count;
 };
 
-/* boot_smp_cpu.state */
 enum boot_smp_state {
-    BOOT_SMP_OFF = 0,    /* not started: no answer, or not addressable (xAPIC, ID > 254) */
-    BOOT_SMP_BSP = 1,    /* the CPU running the kernel */
-    BOOT_SMP_PARKED = 2  /* waiting on goto_address */
+    BOOT_SMP_OFF = 0,
+    BOOT_SMP_BSP = 1,
+    BOOT_SMP_PARKED = 2
 };
 
-/* boot_info.smp_flags */
-#define BOOT_SMP_F_X2APIC (1u << 0) /* APs were started through x2APIC MSRs */
+#define BOOT_SMP_F_X2APIC (1u << 0)
 
-/* One CPU of the MADT. The loader never writes an entry after handoff;
- * a parked AP only reads goto_address. */
 struct boot_smp_cpu {
-    uint32_t apic_id;        /* x2APIC ID (xAPIC ID for xAPIC-only entries) */
-    uint32_t acpi_uid;       /* ACPI processor UID from the MADT */
-    uint32_t state;          /* enum boot_smp_state */
+    uint32_t apic_id;
+    uint32_t acpi_uid;
+    uint32_t state;
     uint32_t reserved;
-    uint64_t stack_top;      /* virtual (HHDM), 16-byte aligned; 0 for the BSP */
-    uint64_t goto_address;   /* kernel writes a virtual address to release the AP */
-    uint64_t extra_argument; /* free for the kernel to pass something */
+    uint64_t stack_top;
+    uint64_t goto_address;
+    uint64_t extra_argument;
     uint64_t reserved2[3];
 };
 
-/* A file loaded for the kernel ("module" line in BOOT.CFG): an initrd, a
- * driver, a font. Each module has its own page-aligned allocation; the
- * bytes after `size` up to the page end are zero. */
 #define BOOT_MODULE_STRING_MAX 111
 struct boot_module {
-    uint64_t base;        /* physical, 4 KiB aligned; 0 if size is 0 */
-    uint64_t size;        /* bytes: the file size */
-    char     string[112]; /* NUL-terminated ASCII: the string given in BOOT.CFG,
-                             else the path as written there */
+    uint64_t base;
+    uint64_t size;
+    char     string[112];
 };
 
 struct boot_info {
-    uint64_t magic;               /* BOOT_INFO_MAGIC */
-    uint32_t version;             /* BOOT_INFO_VERSION */
-    uint32_t size;                /* sizeof(struct boot_info) as built */
-    uint64_t flags;               /* BOOT_F_* */
-    uint64_t hhdm_base;           /* virtual address of physical 0 */
-    uint64_t hhdm_size;           /* bytes of physical memory mapped there */
-    uint64_t kernel_phys_base;    /* physical address of kernel_virt_base */
-    uint64_t kernel_virt_base;    /* lowest PT_LOAD page */
-    uint64_t kernel_size;         /* bytes, page-rounded span of all PT_LOADs */
-    uint64_t mmap;                /* phys of struct boot_mem_entry[mmap_count] */
+    uint64_t magic;
+    uint32_t version;
+    uint32_t size;
+    uint64_t flags;
+    uint64_t hhdm_base;
+    uint64_t hhdm_size;
+    uint64_t kernel_phys_base;
+    uint64_t kernel_virt_base;
+    uint64_t kernel_size;
+    uint64_t mmap;
     uint32_t mmap_count;
-    uint32_t mmap_entry_size;     /* sizeof(struct boot_mem_entry); stride */
-    uint64_t cmdline;             /* phys of NUL-terminated ASCII, 0 if none */
-    uint64_t acpi_rsdp;           /* phys of a checksum-validated RSDP, 0 if none */
-    uint64_t smbios_entry;        /* phys of a validated SMBIOS entry point, 0 if none */
-    uint64_t uefi_system_table;   /* phys, 0 on BIOS. Boot services are gone. */
-    uint8_t  acpi_revision;       /* RSDP revision: 0 = ACPI 1.0, 2 = 2.0+ */
-    uint8_t  smbios_major;        /* >= 3 means a 64-bit (_SM3_) entry point */
+    uint32_t mmap_entry_size;
+    uint64_t cmdline;
+    uint64_t acpi_rsdp;
+    uint64_t smbios_entry;
+    uint64_t uefi_system_table;
+    uint8_t  acpi_revision;
+    uint8_t  smbios_major;
     uint8_t  smbios_minor;
-    uint8_t  firmware_type;       /* 1 = UEFI, 2 = BIOS */
-    uint32_t uefi_revision;       /* EFI_SYSTEM_TABLE.Hdr.Revision */
-    uint32_t firmware_revision;   /* vendor-defined */
-    uint32_t loader_reads;        /* file read calls the loader issued */
-    uint64_t loader_bytes_read;   /* bytes those reads transferred */
-    uint64_t tsc_loader_entry;    /* TSC at the loader's first instruction */
-    uint64_t tsc_exit_start;      /* TSC before the final memory map/exit */
-    uint64_t tsc_handoff;         /* TSC immediately before jumping to the kernel */
-    char     firmware_vendor[32]; /* ASCII, NUL-padded */
-    char     loader_version[16];  /* ASCII, NUL-padded */
+    uint8_t  firmware_type;
+    uint32_t uefi_revision;
+    uint32_t firmware_revision;
+    uint32_t loader_reads;
+    uint64_t loader_bytes_read;
+    uint64_t tsc_loader_entry;
+    uint64_t tsc_exit_start;
+    uint64_t tsc_handoff;
+    char     firmware_vendor[32];
+    char     loader_version[16];
     struct boot_cpu         cpu;
     struct boot_framebuffer framebuffer;
     struct boot_device      boot_device;
-    uint64_t modules;             /* phys of struct boot_module[module_count], 0 if none */
+    uint64_t modules;
     uint32_t module_count;
-    uint32_t module_entry_size;   /* sizeof(struct boot_module); stride */
-    uint64_t efi_mmap;            /* phys of the raw EFI memory map, 0 on BIOS */
-    uint64_t efi_mmap_size;       /* bytes */
-    uint32_t efi_mmap_desc_size;  /* stride; may exceed sizeof(EFI_MEMORY_DESCRIPTOR) */
+    uint32_t module_entry_size;
+    uint64_t efi_mmap;
+    uint64_t efi_mmap_size;
+    uint32_t efi_mmap_desc_size;
     uint32_t efi_mmap_desc_version;
-    uint32_t boot_entry;          /* 1-based BOOT.CFG entry booted; 0 = no BOOT.CFG */
+    uint32_t boot_entry;
     uint32_t reserved;
-    char     boot_entry_title[64]; /* ASCII, NUL-terminated; empty without BOOT.CFG */
-    uint64_t loader_log;          /* phys of the loader's console output, 0 if none */
-    uint32_t loader_log_size;     /* bytes: ASCII, '\n' line ends, not NUL-terminated */
+    char     boot_entry_title[64];
+    uint64_t loader_log;
+    uint32_t loader_log_size;
     uint32_t reserved2;
-    struct boot_csme        csme; /* Intel CSME; zero when none was visible */
-    uint64_t pat;                 /* IA32_PAT on every CPU at entry */
-    uint64_t xcr0;                /* XCR0 on every CPU; 0 when XSAVE is off */
-    uint32_t xsave_size;          /* bytes for an XSAVE area of xcr0; 0 without XSAVE */
-    uint32_t smp_count;           /* entries in smp_cpus, BSP included; 0 = no MADT */
-    uint64_t smp_cpus;            /* phys of struct boot_smp_cpu[smp_count], 0 if none */
-    uint32_t smp_parked;          /* entries in state BOOT_SMP_PARKED */
-    uint32_t smp_flags;           /* BOOT_SMP_F_* */
+    struct boot_csme        csme;
+    uint64_t pat;
+    uint64_t xcr0;
+    uint32_t xsave_size;
+    uint32_t smp_count;
+    uint64_t smp_cpus;
+    uint32_t smp_parked;
+    uint32_t smp_flags;
 };
 
-/* ABI verification. A change here is a protocol version change. */
 _Static_assert(sizeof(struct boot_mem_entry) == 24, "boot_mem_entry");
 _Static_assert(sizeof(struct boot_cpu) == 120, "boot_cpu");
 _Static_assert(offsetof(struct boot_cpu, features) == 88, "boot_cpu.features");

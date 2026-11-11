@@ -1,19 +1,10 @@
-/*
- * Baseline JPEG decoder; see include/image/jpeg.h. Section numbers are
- * ITU T.81.
- *
- * The file is parsed marker by marker up to the first scan, which is
- * decoded MCU by MCU straight into the output: each MCU's blocks are
- * entropy-decoded, dequantised, inverse-transformed into small per-component
- * planes, then colour-converted. Nothing is allocated.
- */
+/* Baseline JPEG decoder; see include/image/jpeg.h. */
 #include <stdbool.h>
 #include "image/jpeg.h"
 #include "lib/mem.h"
 
-#define FAST_BITS 9 /* Huffman codes this long or shorter decode by one lookup */
+#define FAST_BITS 9
 
-/* Coefficient k of a block, in the order the file stores them (F.1.1.5). */
 static const uint8_t zigzag[64] = {
      0,  1,  8, 16,  9,  2,  3, 10, 17, 24, 32, 25, 18, 11,  4,  5,
     12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13,  6,  7, 14, 21, 28,
@@ -23,32 +14,31 @@ static const uint8_t zigzag[64] = {
 
 struct huff {
     uint8_t  sym[256];
-    uint16_t fast[1 << FAST_BITS]; /* (length << 8) | symbol; 0: longer code */
-    int32_t  maxcode[17];          /* largest code of each length; -1: none */
-    int32_t  delta[17];            /* symbol index = code + delta[length] */
+    uint16_t fast[1 << FAST_BITS];
+    int32_t  maxcode[17];
+    int32_t  delta[17];
     uint16_t nsym;
     bool     present;
 };
 
 struct comp {
     uint8_t id, h, v, tq, td, ta;
-    int32_t pred;          /* DC predictor */
-    uint8_t pix[16 * 16];  /* this MCU's samples, 16 bytes per row */
+    int32_t pred;
+    uint8_t pix[16 * 16];
 };
 
 struct jpeg {
     const uint8_t *p, *end;
-    uint16_t    q[4][64]; /* in zigzag order, as stored */
-    uint8_t     qpresent; /* bit per table */
+    uint16_t    q[4][64];
+    uint8_t     qpresent;
     struct huff dc[4], ac[4];
     struct comp comp[3];
     uint32_t    ncomp, width, height, hmax, vmax;
-    uint32_t    restart;  /* MCUs per restart interval; 0: none */
+    uint32_t    restart;
     bool        frame;
-    /* entropy-coded data: bits are taken from the top of acc */
     uint32_t    acc;
     int32_t     nbits;
-    bool        marker;   /* hit a marker: only zero bits follow */
+    bool        marker;
 };
 
 static uint32_t be16(const uint8_t *p)
@@ -56,9 +46,6 @@ static uint32_t be16(const uint8_t *p)
     return (uint32_t)p[0] << 8 | p[1];
 }
 
-/* ---- entropy decoding (F.2.2) ---------------------------------------- */
-
-/* Canonical codes from the 16 counts (C.2); false if they overflow. */
 static bool huff_build(struct huff *h, const uint8_t *counts, const uint8_t *syms)
 {
     uint32_t code = 0, k = 0;
@@ -86,8 +73,6 @@ static bool huff_build(struct huff *h, const uint8_t *counts, const uint8_t *sym
     return true;
 }
 
-/* Top up acc to at least 25 bits. Stuffed 0xFF 0x00 is one 0xFF byte; at
- * a marker (or the end of the data) zero bits are fed instead. */
 static void fill(struct jpeg *j)
 {
     while (j->nbits <= 24) {
@@ -109,7 +94,7 @@ static void fill(struct jpeg *j)
     }
 }
 
-static uint32_t get_bits(struct jpeg *j, uint32_t n) /* 1..16 */
+static uint32_t get_bits(struct jpeg *j, uint32_t n)
 {
     uint32_t v;
 
@@ -120,7 +105,6 @@ static uint32_t get_bits(struct jpeg *j, uint32_t n) /* 1..16 */
     return v;
 }
 
-/* RECEIVE and EXTEND (F.2.2.1): s bits as a signed value. */
 static int32_t receive(struct jpeg *j, uint32_t s)
 {
     int32_t v;
@@ -131,7 +115,6 @@ static int32_t receive(struct jpeg *j, uint32_t s)
     return v < (1 << (s - 1)) ? v - (1 << s) + 1 : v;
 }
 
-/* The next symbol, -1 if no code matches. */
 static int decode(struct jpeg *j, const struct huff *h)
 {
     uint32_t f;
@@ -158,8 +141,6 @@ static int decode(struct jpeg *j, const struct huff *h)
     return -1;
 }
 
-/* One block's dequantised coefficients in natural order (F.2.2.1-2). On a
- * bad code the rest of the block stays zero. */
 static void decode_block(struct jpeg *j, struct comp *c, int32_t blk[64])
 {
     const uint16_t *q = j->q[c->tq];
@@ -169,7 +150,6 @@ static void decode_block(struct jpeg *j, struct comp *c, int32_t blk[64])
     if (t < 0 || t > 16)
         return;
     c->pred += receive(j, (uint32_t)t);
-    /* only a damaged file leaves the 16-bit range; keep the products in int32 */
     if (c->pred > 32767)
         c->pred = 32767;
     else if (c->pred < -32768)
@@ -186,7 +166,7 @@ static void decode_block(struct jpeg *j, struct comp *c, int32_t blk[64])
         s = (uint32_t)rs & 15;
         if (!s) {
             if (r != 15)
-                return; /* end of block */
+                return;
             k += 16;
             continue;
         }
@@ -198,19 +178,13 @@ static void decode_block(struct jpeg *j, struct comp *c, int32_t blk[64])
     }
 }
 
-/* ---- inverse DCT --------------------------------------------------------- */
-
-/* One 8-point inverse DCT, the Loeffler-Ligtenberg-Moschytz factorisation
- * that libjpeg's jidctint.c uses, with constants scaled by 2^12. 64-bit
- * intermediates: a damaged file's coefficients cannot overflow them. */
 static void idct8(const int64_t s[8], int64_t o[8])
 {
     int64_t t0, t1, t2, t3, p1, p2, p3, p4, p5, x0, x1, x2, x3;
 
-    /* even part */
-    p1 = (s[2] + s[6]) * 2217;      /* 0.541196100 */
-    t2 = p1 + s[6] * -7568;         /* -1.847759065 */
-    t3 = p1 + s[2] * 3135;          /* 0.765366865 */
+    p1 = (s[2] + s[6]) * 2217;
+    t2 = p1 + s[6] * -7568;
+    t3 = p1 + s[2] * 3135;
     t0 = (s[0] + s[4]) * 4096;
     t1 = (s[0] - s[4]) * 4096;
     x0 = t0 + t3;
@@ -218,7 +192,6 @@ static void idct8(const int64_t s[8], int64_t o[8])
     x1 = t1 + t2;
     x2 = t1 - t2;
 
-    /* odd part */
     t0 = s[7];
     t1 = s[5];
     t2 = s[3];
@@ -227,15 +200,15 @@ static void idct8(const int64_t s[8], int64_t o[8])
     p4 = t1 + t3;
     p1 = t0 + t3;
     p2 = t1 + t2;
-    p5 = (p3 + p4) * 4816;          /* 1.175875602 */
-    t0 *= 1223;                     /* 0.298631336 */
-    t1 *= 8410;                     /* 2.053119869 */
-    t2 *= 12586;                    /* 3.072711026 */
-    t3 *= 6149;                     /* 1.501321110 */
-    p1 = p5 + p1 * -3686;           /* -0.899976223 */
-    p2 = p5 + p2 * -10498;          /* -2.562915447 */
-    p3 *= -8035;                    /* -1.961570560 */
-    p4 *= -1598;                    /* -0.390180644 */
+    p5 = (p3 + p4) * 4816;
+    t0 *= 1223;
+    t1 *= 8410;
+    t2 *= 12586;
+    t3 *= 6149;
+    p1 = p5 + p1 * -3686;
+    p2 = p5 + p2 * -10498;
+    p3 *= -8035;
+    p4 *= -1598;
     t3 += p1 + p4;
     t2 += p2 + p3;
     t1 += p2 + p4;
@@ -256,7 +229,6 @@ static uint8_t clamp8(int64_t v)
     return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
 }
 
-/* Columns, then rows; samples level-shifted by 128 (A.3.1) into `out`. */
 static void idct_block(const int32_t blk[64], uint8_t *out, uint32_t stride)
 {
     int64_t tmp[64], s[8], o[8];
@@ -265,21 +237,16 @@ static void idct_block(const int32_t blk[64], uint8_t *out, uint32_t stride)
         for (uint32_t y = 0; y < 8; y++)
             s[y] = blk[y * 8 + x];
         idct8(s, o);
-        /* back from 2^12 to 2^2: two extra bits of precision for the rows */
         for (uint32_t y = 0; y < 8; y++)
             tmp[y * 8 + x] = (o[y] + 512) >> 10;
     }
     for (uint32_t y = 0; y < 8; y++) {
         idct8(&tmp[y * 8], o);
-        /* 2^12 * 2^2 * 8 (the transform's own scale) = 2^17 */
         for (uint32_t x = 0; x < 8; x++)
             out[y * stride + x] = clamp8((o[x] + 65536 + (128 << 17)) >> 17);
     }
 }
 
-/* ---- the scan -------------------------------------------------------------- */
-
-/* JFIF YCbCr to RGB (CCIR 601), coefficients scaled by 2^16. */
 static uint32_t ycc_rgb(int32_t y, int32_t cb, int32_t cr)
 {
     int32_t yy = (y << 16) + 32768, r, g, b;
@@ -292,8 +259,6 @@ static uint32_t ycc_rgb(int32_t y, int32_t cb, int32_t cr)
     return (uint32_t)clamp8(r) << 16 | (uint32_t)clamp8(g) << 8 | clamp8(b);
 }
 
-/* After a restart interval: drop leftover bits, step over the RSTn marker
- * (scanning past damaged data to reach it) and reset the predictors. */
 static void restart(struct jpeg *j)
 {
     while (j->p + 1 < j->end) {
@@ -332,7 +297,6 @@ static void decode_scan(struct jpeg *j, uint32_t *out, uint32_t stride)
                     }
             }
 
-            /* Colour-convert the part of the MCU inside the picture. */
             w = j->width - mx * mw < mw ? j->width - mx * mw : mw;
             h = j->height - my * mh < mh ? j->height - my * mh : mh;
             for (uint32_t y = 0; y < h; y++) {
@@ -340,7 +304,7 @@ static void decode_scan(struct jpeg *j, uint32_t *out, uint32_t stride)
                 const struct comp *c = j->comp;
 
                 for (uint32_t x = 0; x < w; x++) {
-                    uint32_t yv = c[0].pix[y * 16 + x]; /* luma is never subsampled below hmax */
+                    uint32_t yv = c[0].pix[y * 16 + x];
                     if (j->ncomp == 1) {
                         row[x] = yv * 0x010101u;
                         continue;
@@ -353,8 +317,6 @@ static void decode_scan(struct jpeg *j, uint32_t *out, uint32_t stride)
         }
     }
 }
-
-/* ---- markers (B.2) ---------------------------------------------------------- */
 
 static enum jpeg_error read_dqt(struct jpeg *j, const uint8_t *s, uint32_t n)
 {
@@ -399,12 +361,12 @@ static enum jpeg_error read_sof(struct jpeg *j, const uint8_t *s, uint32_t n)
     if (n < 6)
         return JPEG_CORRUPT;
     if (s[0] != 8)
-        return JPEG_UNSUPPORTED; /* 12-bit samples */
+        return JPEG_UNSUPPORTED;
     j->height = be16(s + 1);
     j->width = be16(s + 3);
     j->ncomp = s[5];
     if (!j->width || !j->height)
-        return JPEG_UNSUPPORTED; /* height in a later DNL marker */
+        return JPEG_UNSUPPORTED;
     if (j->ncomp != 1 && j->ncomp != 3)
         return JPEG_UNSUPPORTED;
     if (n < 6 + 3 * j->ncomp)
@@ -422,7 +384,7 @@ static enum jpeg_error read_sof(struct jpeg *j, const uint8_t *s, uint32_t n)
         if (c->tq > 3)
             return JPEG_CORRUPT;
         if (j->ncomp == 1)
-            c->h = c->v = 1; /* a one-component scan is one block per MCU (A.2.2) */
+            c->h = c->v = 1;
         if (c->h < 1 || c->h > 2 || c->v < 1 || c->v > 2)
             return JPEG_UNSUPPORTED;
         if (c->h > j->hmax)
@@ -430,7 +392,6 @@ static enum jpeg_error read_sof(struct jpeg *j, const uint8_t *s, uint32_t n)
         if (c->v > j->vmax)
             j->vmax = c->v;
     }
-    /* the decoder reads luma at full MCU resolution */
     if (j->comp[0].h != j->hmax || j->comp[0].v != j->vmax)
         return JPEG_UNSUPPORTED;
     j->frame = true;
@@ -447,7 +408,7 @@ static enum jpeg_error read_sos(struct jpeg *j, const uint8_t *s, uint32_t n)
     if (n < 1 + 2 * ns + 3)
         return JPEG_CORRUPT;
     if (ns != j->ncomp)
-        return JPEG_UNSUPPORTED; /* components in separate scans */
+        return JPEG_UNSUPPORTED;
     for (uint32_t i = 0; i < ns; i++) {
         struct comp *c = &j->comp[i];
 
@@ -462,12 +423,10 @@ static enum jpeg_error read_sos(struct jpeg *j, const uint8_t *s, uint32_t n)
     }
     s += 1 + 2 * ns;
     if (s[0] != 0 || s[1] != 63 || s[2] != 0)
-        return JPEG_UNSUPPORTED; /* spectral selection or successive approximation */
+        return JPEG_UNSUPPORTED;
     return JPEG_OK;
 }
 
-/* Walks the markers. With `out`, decodes the first scan into it, provided
- * the frame is width x height; without, stops at the frame header. */
 static enum jpeg_error parse(struct jpeg *j, const uint8_t *data, size_t len, uint32_t *out,
                              uint32_t width, uint32_t height, uint32_t stride)
 {
@@ -483,7 +442,6 @@ static enum jpeg_error parse(struct jpeg *j, const uint8_t *data, size_t len, ui
         const uint8_t *seg;
         uint32_t marker, seglen;
 
-        /* A marker is 0xFF, optional 0xFF fill bytes, then the code. */
         if (j->p >= j->end || *j->p != 0xFF)
             return JPEG_CORRUPT;
         while (j->p < j->end && *j->p == 0xFF)
@@ -491,10 +449,10 @@ static enum jpeg_error parse(struct jpeg *j, const uint8_t *data, size_t len, ui
         if (j->p >= j->end)
             return JPEG_CORRUPT;
         marker = *j->p++;
-        if (marker == 0xD9) /* EOI before any scan */
+        if (marker == 0xD9)
             return JPEG_CORRUPT;
         if ((marker >= 0xD0 && marker <= 0xD7) || marker == 0x01)
-            continue; /* no length field */
+            continue;
         if (j->end - j->p < 2 || (seglen = be16(j->p)) < 2 || (size_t)(j->end - j->p) < seglen)
             return JPEG_CORRUPT;
         seg = j->p + 2;
@@ -502,8 +460,8 @@ static enum jpeg_error parse(struct jpeg *j, const uint8_t *data, size_t len, ui
         j->p += seglen + 2;
 
         switch (marker) {
-        case 0xC0: /* baseline */
-        case 0xC1: /* extended sequential, Huffman */
+        case 0xC0:
+        case 0xC1:
             if ((e = read_sof(j, seg, seglen)) != JPEG_OK || !out)
                 return e;
             if (j->width != width || j->height != height)
@@ -511,7 +469,7 @@ static enum jpeg_error parse(struct jpeg *j, const uint8_t *data, size_t len, ui
             break;
         case 0xC2: case 0xC3: case 0xC5: case 0xC6: case 0xC7:
         case 0xC9: case 0xCA: case 0xCB: case 0xCD: case 0xCE: case 0xCF:
-            return JPEG_UNSUPPORTED; /* progressive, lossless, arithmetic */
+            return JPEG_UNSUPPORTED;
         case 0xC4:
             if ((e = read_dht(j, seg, seglen)) != JPEG_OK)
                 return e;
@@ -530,7 +488,7 @@ static enum jpeg_error parse(struct jpeg *j, const uint8_t *data, size_t len, ui
                 return e;
             decode_scan(j, out, stride);
             return JPEG_OK;
-        default: /* APPn, COM and the rest carry nothing we need */
+        default:
             break;
         }
     }

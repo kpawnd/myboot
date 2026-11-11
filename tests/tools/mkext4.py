@@ -1,29 +1,5 @@
 #!/usr/bin/env python3
-"""
-Writes small ext2/ext4 images for the loader's tests, without mkfs (the
-build machine is Windows). The layouts are picked to exercise the reader
-rather than to look like mke2fs output:
-
-  --fragment N   files are split into extents of at most N blocks with a
-                 gap after each, so long files need extent index nodes
-                 (ext4) or long runs of indirect pointers (ext2)
-  --ext2         block maps (direct, single, double, triple indirect)
-                 instead of extents, 32-bit group descriptors
-  --meta-bg      descriptors of every group past the first metagroup live
-                 in that metagroup's first group
-  --extras       a directory spanning several blocks, fast, slow, absolute,
-                 relative, chained and looping symlinks, a symlink to a
-                 directory, and a file with holes (and, on ext4, an
-                 unwritten extent)
-
-Inodes are spread over all block groups, so lookups visit many inode tables.
-
-  mkext4.py OUT [options] [/path=HOSTFILE ...] [--link /path=TARGET ...]
-
---wrap gpt|mbr puts the filesystem in a partition at 1 MiB, with
---partuuid as the GPT partition GUID or the MBR disk signature (8 hex
-digits); --wrap none writes the bare filesystem.
-"""
+"""Writes small ext2/ext4 images for the loader's tests, without mkfs (the build machine is Windows)."""
 import argparse
 import struct
 import sys
@@ -35,17 +11,15 @@ FT = {S_IFREG: 1, S_IFDIR: 2, S_IFLNK: 7}
 FL_EXTENTS = 0x80000
 TIME = 1700000000
 
-
 class Node:
     def __init__(self, kind, data=b"", target=b""):
         self.kind = kind
         self.data = data
         self.target = target
         self.children = {}
-        self.holes = set()      # logical blocks never allocated
-        self.unwritten = set()  # allocated but flagged unwritten (read as zeros)
+        self.holes = set()
+        self.unwritten = set()
         self.ino = 0
-
 
 class Ext:
     def __init__(self, a):
@@ -67,8 +41,6 @@ class Ext:
         self.used_inodes = set()
         self.dir_inodes = set()
         self.layout()
-
-    # ---- layout ---------------------------------------------------------
 
     def has_super(self, g):
         if g <= 1:
@@ -108,7 +80,7 @@ class Ext:
             if self.has_super(g):
                 cur += 1 + self.gdt_blocks()
             if self.a.meta_bg and g // self.per >= self.first_meta_bg and g % self.per == 0:
-                cur += 1  # this metagroup's descriptor block (after any superblock)
+                cur += 1
             self.bb.append(cur)
             self.ib.append(cur + 1)
             self.it.append(cur + 2)
@@ -121,10 +93,7 @@ class Ext:
         for i in range(1, 11):
             self.used_inodes.add(i)
 
-    # ---- allocation -----------------------------------------------------
-
     def alloc(self, want, gap=False):
-        """Up to `want` contiguous blocks: (first, count)."""
         while self.next[self.alloc_group] >= self.group_end(self.alloc_group):
             self.alloc_group += 1
             if self.alloc_group == self.groups:
@@ -151,13 +120,10 @@ class Ext:
         p = blk * self.bs + off
         self.img[p:p + len(data)] = data
 
-    # ---- file data ------------------------------------------------------
-
     def write_data(self, node):
-        """Allocates and writes node.data; returns (i_block, blocks512)."""
         bs = self.bs
         n = (len(node.data) + bs - 1) // bs
-        runs = []  # (lblk, pblk, count, unwritten)
+        runs = []
         frag = self.a.fragment or 1 << 30
         lblk = 0
         while lblk < n:
@@ -234,8 +200,6 @@ class Ext:
         assert n <= base, "file too large for a block map"
         return struct.pack("<15I", *(direct + tops)), meta[0]
 
-    # ---- tree -----------------------------------------------------------
-
     def number(self, node, k=[0]):
         for name in sorted(node.children):
             child = node.children[name]
@@ -292,8 +256,6 @@ class Ext:
         g, idx = (node.ino - 1) // self.ipg, (node.ino - 1) % self.ipg
         self.put(self.it[g], raw, idx * self.inode_size)
 
-    # ---- metadata -------------------------------------------------------
-
     def finish(self):
         a = self.a
         for g in range(self.groups):
@@ -337,7 +299,6 @@ class Ext:
         self.img[1024:2048] = sb
         return bytes(self.img)
 
-
 def extras(root, bs, ext4):
     many = Node(S_IFDIR)
     for i in range(300):
@@ -357,7 +318,7 @@ def extras(root, bs, ext4):
         for b in range(25, 30):
             holes.unwritten.add(b)
             data[b * bs:(b + 1) * bs] = bytes(bs)
-    holes.data = bytes(data[:-100])  # end mid-block
+    holes.data = bytes(data[:-100])
     root.children["holes.bin"] = holes
 
     links = Node(S_IFDIR)
@@ -369,7 +330,6 @@ def extras(root, bs, ext4):
     links.children["loop2"] = Node(S_IFLNK, target=b"loop1")
     links.children["dir"] = Node(S_IFLNK, target=b"../many")
     root.children["links"] = links
-
 
 def wrap(fs, kind, partuuid):
     if kind == "none":
@@ -385,7 +345,6 @@ def wrap(fs, kind, partuuid):
         struct.pack_into("<B3sB3sII", img, 446, 0, b"\0\2\0", 0x83, b"\xfe\xff\xff", start, count)
         img[510:512] = b"\x55\xaa"
         return bytes(img)
-    # GPT: protective MBR, primary header and entries, backup at the end.
     struct.pack_into("<B3sB3sII", img, 446, 0, b"\0\2\0", 0xEE, b"\xfe\xff\xff", 1,
                      min(total - 1, 0xFFFFFFFF))
     img[510:512] = b"\x55\xaa"
@@ -407,7 +366,6 @@ def wrap(fs, kind, partuuid):
     img[(last - 32) * sector:(last - 32) * sector + len(entries)] = entries
     img[last * sector:last * sector + 92] = header(last, 1, last - 32)
     return bytes(img)
-
 
 def main():
     p = argparse.ArgumentParser()
@@ -455,7 +413,6 @@ def main():
     root.children["lost+found"] = lf
     fs.write_tree(root, root)
     open(a.out, "wb").write(wrap(fs.finish(), a.wrap, a.partuuid))
-
 
 if __name__ == "__main__":
     main()

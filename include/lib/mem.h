@@ -1,4 +1,4 @@
-/* Freestanding memory routines (src/lib/mem.c). Same contracts as ISO C. */
+/* Freestanding memory routines (src/lib/mem.c). */
 #ifndef LIB_MEM_H
 #define LIB_MEM_H
 

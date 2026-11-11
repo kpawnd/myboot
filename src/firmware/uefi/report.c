@@ -1,9 +1,3 @@
-/*
- * Status lines for the boot log (DEBUG and BALANCED builds only): what
- * discovery found, right after it ran, and the prepared handoff, just
- * before the kernel starts. DEBUG adds detail lines: CPU features, ACPI
- * table signatures, SMBIOS strings, kernel placement and phase timings.
- */
 #include "core/config.h"
 
 #if BOOT_LOG
@@ -26,7 +20,6 @@ static void blog_uefi_revision(uint32_t rev)
     }
 }
 
-/* Firmware strings are UTF-16 of unknown length: bounded, ASCII only. */
 static void blog_vendor(const CHAR16 *s)
 {
     char buf[64];
@@ -106,7 +99,6 @@ static void blog_name(const char *name, const char *what, uint32_t v)
     }
 }
 
-/* Fixed-width uppercase hex, no prefix: PCI IDs as lspci writes them. */
 static void blog_hexn(uint32_t v, int digits)
 {
     char d[9];
@@ -129,7 +121,6 @@ static void blog_fw_version(const struct boot_csme *c)
 }
 
 #if BOOT_DEBUG
-/* 8-4-4-4-12, the first three fields little-endian on the wire */
 static void blog_uuid(const uint8_t u[16])
 {
     blog_hexn(u[0] | (u[1] << 8) | (u[2] << 16) | ((uint32_t)u[3] << 24), 8);
@@ -146,7 +137,6 @@ static void blog_uuid(const uint8_t u[16])
 }
 #endif
 
-/* "N clients (MKHI, AMTHI, 3 unnamed)" */
 static void blog_csme_clients(const struct boot_csme *c, const struct csme_clients *cl)
 {
     unsigned unnamed = c->client_count - cl->count;
@@ -217,7 +207,6 @@ static void report_csme(const struct boot_state *s)
     }
     blog_end(normal && !c->error_code ? TAG_OK : TAG_INFO);
 
-    /* A failure the other path made up for is only information. */
     if (c->version_status > BOOT_CSME_ST_NOT_NORMAL) {
         blog_str("Intel CSME did not answer at MKHI's fixed address: ");
         blog_str(csme_status_name(c->version_status));
@@ -295,7 +284,6 @@ void report_discovery(const struct boot_state *s)
     const struct boot_framebuffer *fb = s->fb;
     const struct boot_device *dev = s->dev;
 
-    /* The heading, untagged like systemd's "Welcome to ...". */
     blog_str("MYBOOT " LOADER_VERSION " [");
     blog_wstr(BOOT_CONFIG_NAME);
     blog_str("] on ");
@@ -464,7 +452,6 @@ void report_handoff(const struct boot_state *s)
     blog_str(s->nmod == 1 ? " module" : " modules");
     blog_end(TAG_OK);
 
-    /* What the CPUs will run with; set after ExitBootServices. */
     blog_str("Prepared CPU state: SSE");
     if (s->xcr0 & XCR0_AVX)
         blog_str(", AVX");

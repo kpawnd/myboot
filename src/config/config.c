@@ -1,7 +1,4 @@
-/*
- * BOOT.CFG parser (format in include/config/config.h). Firmware-independent:
- * it sees only a byte buffer, so the BIOS backend can reuse it unchanged.
- */
+/* BOOT.CFG parser (format in include/config/config.h). */
 #include <stdbool.h>
 #include "config/config.h"
 #include "lib/mem.h"
@@ -32,7 +29,6 @@ static void add_error(struct boot_config *c, uint32_t line, const char *msg)
     c->nerrors++;
 }
 
-/* Decimal, 1 to 6 digits, nothing else. */
 static bool parse_uint(const char *s, uint32_t *out)
 {
     uint32_t v = 0, n = 0;
@@ -48,8 +44,6 @@ static bool parse_uint(const char *s, uint32_t *out)
     return true;
 }
 
-/* Terminates the first word of `s` and returns the rest with leading
- * blanks skipped ("" if there is no rest). */
 static char *split_word(char *s)
 {
     while (*s && !is_blank(*s))
@@ -133,8 +127,7 @@ static void entry_directive(struct boot_config *c, struct cfg_entry *e, uint32_t
             e->cmdline = val;
             e->cmdline_len = (uint32_t)n;
         }
-    } else { /* module or initrd: which one must match the entry's type,
-              * so it is checked once the entry is complete (cfg_parse) */
+    } else {
         char *str = key[0] == 'm' ? split_word(val) : (char *)"";
         if (e->nmod == CFG_MAX_MODULES)
             err = "more than 8 modules or initrds in one entry";
@@ -155,10 +148,10 @@ static void entry_directive(struct boot_config *c, struct cfg_entry *e, uint32_t
 void cfg_parse(char *text, size_t len, struct boot_config *c)
 {
     char *p = text, *end = text + len;
-    struct cfg_entry *cur = NULL;   /* entry being filled */
-    bool overflow = false;          /* past CFG_MAX_ENTRIES: ignore entry lines */
+    struct cfg_entry *cur = NULL;
+    bool overflow = false;
     uint32_t entry_line[CFG_MAX_ENTRIES];
-    uint8_t file_kind[CFG_MAX_ENTRIES] = {0}; /* bit 0: module lines, bit 1: initrd lines */
+    uint8_t file_kind[CFG_MAX_ENTRIES] = {0};
     uint32_t line = 0, nraw = 0, want_default = 1, default_line = 0, n = 0;
     bool default_found = false;
 
@@ -242,7 +235,6 @@ void cfg_parse(char *text, size_t len, struct boot_config *c)
         }
     }
 
-    /* Drop entries without a kernel; "default" counts entries as written. */
     for (uint32_t i = 0; i < nraw; i++) {
         static const uint8_t allowed[] = {[CFG_KERNEL] = 1, [CFG_LINUX] = 2, [CFG_EFI] = 0};
 

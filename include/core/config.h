@@ -1,18 +1,4 @@
-/*
- * Build-configuration switches. The Makefile defines exactly one of
- * BOOT_CONFIG_DEBUG / BOOT_CONFIG_BALANCED / BOOT_CONFIG_RELEASE; everything
- * else is derived here so source files only ever test BOOT_* feature macros.
- *
- *   BOOT_LOG      diagnostic console output (banner, discovery summary)
- *   BOOT_DEBUG    verbose output and assertions
- *   BOOT_PROFILE  TSC timing points
- *   BOOT_CSME_QUERY  ask the Intel CSME its firmware version over HECI
- *                    (on by default; -DBOOT_CSME_QUERY=0 keeps the CSME
- *                    check to reading PCI configuration space)
- *
- * Code under a disabled switch must compile away completely: release images
- * contain no logging strings, no formatting code and no timing state.
- */
+/* Build-configuration switches. */
 #ifndef CORE_CONFIG_H
 #define CORE_CONFIG_H
 

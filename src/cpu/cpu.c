@@ -1,10 +1,4 @@
-/*
- * CPU discovery from CPUID (Intel SDM vol. 2A "CPUID"; AMD APM vol. 3 E.3).
- *
- * Cost: about 15 CPUID executions. CPUID is serialising and can exit to the
- * hypervisor under virtualisation (~1-2 us each on real hardware VMs, more
- * under TCG), so every leaf is read once and the result cached.
- */
+/* CPU discovery from CPUID (Intel SDM vol. */
 #include <stdbool.h>
 #include "cpu/cpu.h"
 #include "arch/x86_64/cpu.h"
@@ -31,11 +25,9 @@ static void read_brand(struct boot_cpu *c)
     }
     while (skip < 48 && raw[skip] == ' ')
         skip++;
-    memcpy(c->brand, raw + skip, 48 - skip); /* tail stays zero-filled */
+    memcpy(c->brand, raw + skip, 48 - skip);
 }
 
-/* Leaf 15h gives TSC = crystal * EBX / EAX exactly; leaf 16h only the
- * nominal base frequency in MHz. Both are often absent (AMD, most VMs). */
 static void read_tsc_freq(struct boot_cpu *c, uint32_t max_leaf)
 {
     uint32_t r[4];
@@ -57,8 +49,6 @@ static void read_tsc_freq(struct boot_cpu *c, uint32_t max_leaf)
     }
 }
 
-/* Leaf 0Bh: level 0 is SMT (threads per core), level 1 is core (logical
- * processors per package). Only trusted when the level types match. */
 static void read_topology(struct boot_cpu *c, uint32_t max_leaf)
 {
     uint32_t r[4];
@@ -69,7 +59,7 @@ static void read_topology(struct boot_cpu *c, uint32_t max_leaf)
     if (((r[2] >> 8) & 0xFF) != 1 || (r[1] & 0xFFFF) == 0)
         return;
     c->threads_per_core = (uint16_t)(r[1] & 0xFFFF);
-    c->bsp_apic_id = r[3]; /* full 32-bit x2APIC ID */
+    c->bsp_apic_id = r[3];
     cpuid(0x0B, 1, r);
     if (((r[2] >> 8) & 0xFF) == 2)
         c->logical_per_package = (uint16_t)(r[1] & 0xFFFF);
@@ -86,7 +76,7 @@ const struct boot_cpu *discover_cpu(void)
 
     cpuid(0, 0, r);
     max_leaf = r[0];
-    memcpy(c->vendor + 0, &r[1], 4); /* EBX, EDX, ECX order */
+    memcpy(c->vendor + 0, &r[1], 4);
     memcpy(c->vendor + 4, &r[3], 4);
     memcpy(c->vendor + 8, &r[2], 4);
 
@@ -102,7 +92,7 @@ const struct boot_cpu *discover_cpu(void)
                        ? (((r[0] >> 16) & 0xF) << 4) | base_model
                        : base_model;
         c->bsp_apic_id = r[1] >> 24;
-        if (r[3] & (1u << 28)) /* HTT: EBX[23:16] is a valid count */
+        if (r[3] & (1u << 28))
             c->logical_per_package = (uint16_t)((r[1] >> 16) & 0xFF);
 
         set_if(&c->features, r[3], 0, BOOT_CPU_FPU);
@@ -155,12 +145,10 @@ const struct boot_cpu *discover_cpu(void)
         c->phys_addr_bits = (uint8_t)(r[0] & 0xFF);
         c->virt_addr_bits = (uint8_t)((r[0] >> 8) & 0xFF);
     } else {
-        c->phys_addr_bits = 36; /* architectural defaults without the leaf */
+        c->phys_addr_bits = 36;
         c->virt_addr_bits = 48;
     }
 
-    /* Hypervisor leaves exist only when CPUID.1:ECX[31] says so; reading
-     * them on bare metal returns data from the highest basic leaf. */
     if (c->features & BOOT_CPU_HYPERVISOR) {
         cpuid(0x40000000u, 0, r);
         memcpy(c->hypervisor + 0, &r[1], 4);
@@ -168,7 +156,7 @@ const struct boot_cpu *discover_cpu(void)
         memcpy(c->hypervisor + 8, &r[3], 4);
         if (!c->tsc_hz && r[0] >= 0x40000010u) {
             uint32_t h[4];
-            cpuid(0x40000010u, 0, h); /* EAX = TSC kHz (VMware/KVM convention) */
+            cpuid(0x40000010u, 0, h);
             if (h[0]) {
                 c->tsc_hz = (uint64_t)h[0] * 1000u;
                 c->tsc_source = BOOT_TSC_HYPERVISOR;

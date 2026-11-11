@@ -1,25 +1,4 @@
-/*
- * mkiso: build a UEFI-bootable hybrid ISO without xorriso/mtools.
- *
- *   mkiso OUT.iso DEST=SRC [DEST=SRC ...]
- *   e.g. mkiso myboot.iso EFI/BOOT/BOOTX64.EFI=build/release/.../BOOTX64.EFI
- *
- * Host tool (runs on the build machine, uses the host C library). Layout:
- *
- *   ISO 2048-byte sectors
- *     0-15   system area: an MBR whose single partition (type 0xEF) covers
- *            the embedded FAT image, so the same file boots from USB
- *     16     Primary Volume Descriptor (ECMA-119 8.4)
- *     17     El Torito Boot Record (El Torito 1.0, 2.0)
- *     18     Volume Descriptor Set Terminator
- *     19/20  path tables (little/big endian), root only
- *     21     root directory: ".", "..", EFIBOOT.IMG
- *     22     El Torito boot catalog: platform 0xEF (UEFI), no emulation
- *     23..   EFIBOOT.IMG: FAT12 image holding the DEST files
- *
- * UEFI firmware finds the catalog entry (CD/DVD) or the MBR partition (USB),
- * mounts the FAT image and runs \EFI\BOOT\BOOTX64.EFI.
- */
+/* mkiso: build a UEFI-bootable hybrid ISO without xorriso/mtools. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,9 +9,8 @@
 #define MAX_FILES  16
 #define MAX_DIRS   16
 #define FAT12_MAX_CLUSTERS 4084u
-#define ROOT_ENTRIES 224u   /* 14 sectors, the floppy standard */
+#define ROOT_ENTRIES 224u
 
-/* FAT date 2026-10-26 00:00 (fixed: reproducible images) */
 #define FAT_DATE (((2026 - 1980) << 9) | (10 << 5) | 26)
 
 static void die(const char *msg, const char *arg)
@@ -48,21 +26,19 @@ static void put32be(uint8_t *p, uint32_t v) { put16be(p, v >> 16); put16be(p + 2
 static void both16(uint8_t *p, uint32_t v) { put16(p, v); put16be(p + 2, v); }
 static void both32(uint8_t *p, uint32_t v) { put32(p, v); put32be(p + 4, v); }
 
-/* ---- input files -------------------------------------------------------- */
-
 struct file {
-    char     dir[64];   /* "EFI/BOOT" */
-    char     name[11];  /* 8.3, space padded */
+    char     dir[64];
+    char     name[11];
     uint8_t *data;
     uint32_t size;
     uint32_t cluster;
 };
 
 struct dir {
-    char     path[64];  /* "" = root */
+    char     path[64];
     char     name[11];
-    int      parent;    /* index into dirs, -1 for root */
-    uint32_t cluster;   /* 0 for root (fixed region) */
+    int      parent;
+    uint32_t cluster;
 };
 
 static struct file files[MAX_FILES];
@@ -140,8 +116,6 @@ static void add_file(const char *spec)
     fclose(fp);
 }
 
-/* ---- FAT12 image ----------------------------------------------------------- */
-
 struct fat {
     uint8_t *img;
     uint32_t bytes, spc, cluster_bytes, fat_sectors, clusters;
@@ -164,7 +138,6 @@ static void fat_set(struct fat *f, uint32_t c, uint32_t v)
     }
 }
 
-/* Contiguous chain of n clusters; returns the first (0 if n == 0). */
 static uint32_t fat_alloc(struct fat *f, uint32_t n)
 {
     uint32_t first = f->next_cluster;
@@ -186,9 +159,9 @@ static void dirent(uint8_t *e, const char name[11], uint8_t attr, uint32_t clust
 {
     memcpy(e, name, 11);
     e[11] = attr;
-    put16(e + 16, FAT_DATE); /* creation date */
-    put16(e + 18, FAT_DATE); /* access date */
-    put16(e + 24, FAT_DATE); /* write date */
+    put16(e + 16, FAT_DATE);
+    put16(e + 18, FAT_DATE);
+    put16(e + 24, FAT_DATE);
     put16(e + 26, cluster);
     put32(e + 28, size);
 }
@@ -209,11 +182,9 @@ static void build_fat(struct fat *f)
     unsigned used[MAX_DIRS] = {0};
     uint8_t *b;
 
-    /* Smallest cluster size that keeps FAT12; at least a 1.44 MB floppy
-     * geometry, which every FAT driver handles. */
     for (f->spc = 1; ; f->spc *= 2) {
         f->cluster_bytes = f->spc * FAT_SECTOR;
-        need = (uint32_t)ndirs - 1; /* one cluster per subdirectory */
+        need = (uint32_t)ndirs - 1;
         for (int i = 0; i < nfiles; i++)
             need += (files[i].size + f->cluster_bytes - 1) / f->cluster_bytes;
         if (need + 16 <= FAT12_MAX_CLUSTERS)
@@ -232,33 +203,31 @@ static void build_fat(struct fat *f)
     if (!(f->img = calloc(1, f->bytes)))
         die("out of memory", NULL);
 
-    /* Boot sector / BPB (Microsoft FAT spec, BPB for FAT12/16). */
     b = f->img;
     b[0] = 0xEB, b[1] = 0x3C, b[2] = 0x90;
     memcpy(b + 3, "MYBOOT  ", 8);
     put16(b + 11, FAT_SECTOR);
     b[13] = (uint8_t)f->spc;
-    put16(b + 14, 1);                 /* reserved sectors */
-    b[16] = 2;                        /* FATs */
+    put16(b + 14, 1);
+    b[16] = 2;
     put16(b + 17, ROOT_ENTRIES);
     if (total_sectors < 65536)
         put16(b + 19, total_sectors);
     else
         put32(b + 32, total_sectors);
-    b[21] = 0xF0;                     /* media: removable */
+    b[21] = 0xF0;
     put16(b + 22, f->fat_sectors);
-    put16(b + 24, 18);                /* sectors per track (unused by UEFI) */
-    put16(b + 26, 2);                 /* heads */
-    b[38] = 0x29;                     /* extended boot signature */
-    put32(b + 39, 0x4D594254);        /* volume serial */
+    put16(b + 24, 18);
+    put16(b + 26, 2);
+    b[38] = 0x29;
+    put32(b + 39, 0x4D594254);
     memcpy(b + 43, "MYBOOT     ", 11);
     memcpy(b + 54, "FAT12   ", 8);
     b[510] = 0x55, b[511] = 0xAA;
 
-    fat_set(f, 0, 0xFF0);             /* media byte */
+    fat_set(f, 0, 0xFF0);
     fat_set(f, 1, 0xFFF);
 
-    /* Directories first (parents before children by construction). */
     for (int i = 1; i < ndirs; i++) {
         struct dir *d = &dirs[i];
         uint8_t *e;
@@ -281,8 +250,6 @@ static void build_fat(struct fat *f)
     }
 }
 
-/* ---- ISO9660 + El Torito ----------------------------------------------------- */
-
 static void iso_date7(uint8_t *p)
 {
     p[0] = 2026 - 1900, p[1] = 10, p[2] = 26, p[3] = p[4] = p[5] = 0, p[6] = 0;
@@ -294,7 +261,6 @@ static void iso_date17(uint8_t *p, int zero)
     p[16] = 0;
 }
 
-/* Directory record (ECMA-119 9.1); returns its length. */
 static uint32_t iso_dirrec(uint8_t *p, uint32_t lba, uint32_t size, uint8_t flags,
                            const char *name, uint8_t name_len)
 {
@@ -328,7 +294,7 @@ int main(int argc, char **argv)
 
     if (argc < 3)
         die("usage: mkiso OUT.iso DEST=SRC [DEST=SRC ...]", NULL);
-    find_or_add_dir(""); /* root is dirs[0] */
+    find_or_add_dir("");
     for (int i = 2; i < argc; i++)
         add_file(argv[i]);
     build_fat(&fat);
@@ -339,18 +305,16 @@ int main(int argc, char **argv)
     if (!(iso = calloc(total, ISO_SECTOR)))
         die("out of memory", NULL);
 
-    /* Hybrid MBR in the system area: one EFI System partition = the image. */
     s = iso;
-    put32(s + 440, 0x4D594254);       /* disk signature */
-    s[446 + 0] = 0x00;                /* not active (UEFI ignores it) */
-    s[446 + 1] = 0xFE, s[446 + 2] = 0xFF, s[446 + 3] = 0xFF; /* CHS: use LBA */
-    s[446 + 4] = 0xEF;                /* EFI System Partition */
+    put32(s + 440, 0x4D594254);
+    s[446 + 0] = 0x00;
+    s[446 + 1] = 0xFE, s[446 + 2] = 0xFF, s[446 + 3] = 0xFF;
+    s[446 + 4] = 0xEF;
     s[446 + 5] = 0xFE, s[446 + 6] = 0xFF, s[446 + 7] = 0xFF;
     put32(s + 446 + 8, LBA_IMAGE * (ISO_SECTOR / FAT_SECTOR));
     put32(s + 446 + 12, img512);
     s[510] = 0x55, s[511] = 0xAA;
 
-    /* Primary Volume Descriptor */
     s = iso + LBA_PVD * ISO_SECTOR;
     s[0] = 1;
     memcpy(s + 1, "CD001", 5);
@@ -361,7 +325,7 @@ int main(int argc, char **argv)
     both16(s + 120, 1);
     both16(s + 124, 1);
     both16(s + 128, ISO_SECTOR);
-    both32(s + 132, 10);              /* path table: one 10-byte root entry */
+    both32(s + 132, 10);
     put32(s + 140, LBA_PT_L);
     put32be(s + 148, LBA_PT_M);
     iso_dirrec(s + 156, LBA_ROOT, ISO_SECTOR, 0x02, "\0", 1);
@@ -378,7 +342,6 @@ int main(int argc, char **argv)
     iso_date17(s + 864, 1);
     s[881] = 1;
 
-    /* El Torito Boot Record Volume Descriptor */
     s = iso + LBA_BOOTREC * ISO_SECTOR;
     s[0] = 0;
     memcpy(s + 1, "CD001", 5);
@@ -386,25 +349,21 @@ int main(int argc, char **argv)
     memcpy(s + 7, "EL TORITO SPECIFICATION", 23);
     put32(s + 71, LBA_CATALOG);
 
-    /* Terminator */
     s = iso + LBA_TERM * ISO_SECTOR;
     s[0] = 255;
     memcpy(s + 1, "CD001", 5);
     s[6] = 1;
 
-    /* Path tables: root only (identifier 0x00, parent 1) */
     s = iso + LBA_PT_L * ISO_SECTOR;
     s[0] = 1, put32(s + 2, LBA_ROOT), put16(s + 6, 1);
     s = iso + LBA_PT_M * ISO_SECTOR;
     s[0] = 1, put32be(s + 2, LBA_ROOT), put16be(s + 6, 1);
 
-    /* Root directory */
     s = iso + LBA_ROOT * ISO_SECTOR;
     s += iso_dirrec(s, LBA_ROOT, ISO_SECTOR, 0x02, "\0", 1);
     s += iso_dirrec(s, LBA_ROOT, ISO_SECTOR, 0x02, "\1", 1);
     iso_dirrec(s, LBA_IMAGE, fat.bytes, 0x00, "EFIBOOT.IMG;1", 13);
 
-    /* Boot catalog: validation entry (platform EFI) + default entry */
     s = iso + LBA_CATALOG * ISO_SECTOR;
     s[0] = 1;
     s[1] = 0xEF;
@@ -412,9 +371,9 @@ int main(int argc, char **argv)
     s[30] = 0x55, s[31] = 0xAA;
     for (int i = 0; i < 32; i += 2)
         sum = (uint16_t)(sum + (s[i] | (s[i + 1] << 8)));
-    put16(s + 28, (uint16_t)(0x10000 - sum)); /* words sum to zero */
-    s[32] = 0x88;                     /* bootable */
-    s[33] = 0;                        /* no emulation */
+    put16(s + 28, (uint16_t)(0x10000 - sum));
+    s[32] = 0x88;
+    s[33] = 0;
     put16(s + 38, img512 <= 0xFFFF ? img512 : 0);
     put32(s + 40, LBA_IMAGE);
 

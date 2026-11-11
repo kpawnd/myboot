@@ -1,7 +1,5 @@
 #include "memory/memmap.h"
 
-/* Insertion sort: maps are a few dozen to a few hundred entries and usually
- * already sorted, where this is O(n). No recursion, no scratch memory. */
 static void sort_by_base(struct boot_mem_entry *e, uint32_t n)
 {
     for (uint32_t i = 1; i < n; i++) {
@@ -30,9 +28,6 @@ uint32_t mmap_sort_merge(struct boot_mem_entry *e, uint32_t n)
             uint64_t prev_end = prev->base + prev->length;
 
             if (cur.base < prev_end) {
-                /* Overlap (a firmware bug). If the earlier entry is usable
-                 * and the later is not, the later wins and the usable tail
-                 * is dropped; otherwise the later entry is trimmed. */
                 if (prev->type == BOOT_MEM_USABLE && cur.type != BOOT_MEM_USABLE) {
                     prev->length = cur.base - prev->base;
                     if (prev->length == 0)

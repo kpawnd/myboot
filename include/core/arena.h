@@ -1,9 +1,4 @@
-/*
- * Bump allocator over one contiguous block. Never frees; the whole block is
- * handed to the kernel (as BOOTLOADER_RECLAIMABLE) or released at once.
- * Addresses are physical; before paging changes they are also usable as
- * pointers because firmware identity-maps memory.
- */
+/* Bump allocator over one contiguous block. */
 #ifndef CORE_ARENA_H
 #define CORE_ARENA_H
 
@@ -12,10 +7,9 @@
 struct arena {
     uint64_t base;
     uint64_t size;
-    uint64_t used; /* high-water mark == current offset (no frees) */
+    uint64_t used;
 };
 
-/* Returns NULL when the request does not fit. `align` is a power of two. */
 static inline void *arena_alloc(struct arena *a, uint64_t size, uint64_t align)
 {
     uint64_t end = a->base + a->size;

@@ -1,13 +1,4 @@
-/*
- * UEFI hardware/firmware discovery. Everything comes from firmware-provided
- * structures (memory map, configuration tables, GOP, device paths), except
- * the CSME check, which reads PCI configuration space and may exchange one
- * message with the CSME (src/csme/csme.c). Each discover_*() runs once and
- * caches.
- *
- * Dependencies: memory <- acpi, smbios, graphics (pointer validation);
- * cpu, acpi <- csme.
- */
+/* UEFI hardware/firmware discovery. */
 #include "firmware/uefi_boot.h"
 #include "core/config.h"
 #include "core/util.h"
@@ -17,7 +8,7 @@
 #include "lib/mem.h"
 
 #define MMAP_SLACK_DESCS 32
-#define MAX_CONFIG_TABLES 1024 /* real firmware has ~10-20 */
+#define MAX_CONFIG_TABLES 1024
 
 EFI_GUID g_guid_loaded_image = {0x5B1B31A1, 0x9562, 0x11D2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static EFI_GUID guid_acpi20  = {0x8868E871, 0xE4F1, 0x11D3, {0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81}};
@@ -27,8 +18,6 @@ static EFI_GUID guid_smbios3 = {0xF2FD1544, 0x9794, 0x4A2C, {0x99, 0x2E, 0xE5, 0
 static EFI_GUID guid_gop     = {0x9042A9DE, 0x23DC, 0x4A38, {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
 static EFI_GUID guid_devpath = {0x09576E91, 0x6D3F, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static EFI_GUID guid_blockio = {0x964E5B21, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
-
-/* ---- memory ---------------------------------------------------------- */
 
 static struct uefi_memory g_mem;
 static bool g_mem_done, g_mem_ok;
@@ -61,17 +50,12 @@ struct uefi_memory *discover_memory(void)
             case EfiLoaderCode:
             case EfiLoaderData:
                 g_mem.usable += bytes;
-                /* fall through */
             case EfiRuntimeServicesCode:
             case EfiRuntimeServicesData:
             case EfiACPIReclaimMemory:
             case EfiACPIMemoryNVS:
             case EfiPersistentMemory:
                 g_mem.total += bytes;
-                /* Only RAM-backed types set the HHDM extent. Reserved and
-                 * MMIO ranges can sit far above RAM (e.g. a 1 TiB reserved
-                 * HyperTransport hole on AMD): mapping up to them cost 1033
-                 * page-table pages and 27 ms under QEMU for no usable byte. */
                 if (end > g_mem.top)
                     g_mem.top = end;
                 break;
@@ -82,9 +66,6 @@ struct uefi_memory *discover_memory(void)
     return g_mem_ok ? &g_mem : NULL;
 }
 
-/* Firmware pointers are accepted only if both ends of the range lie in
- * memory the map describes and that is not free RAM (a table in free RAM
- * would be overwritten by the kernel). */
 bool uefi_phys_range_ok(uint64_t addr, uint64_t len)
 {
     int t0, t1;
@@ -95,8 +76,6 @@ bool uefi_phys_range_ok(uint64_t addr, uint64_t len)
     t1 = uefi_mmap_type_at(&g_mem.map, addr + len - 1);
     return t0 >= 0 && t1 >= 0 && t0 != EfiConventionalMemory && t1 != EfiConventionalMemory;
 }
-
-/* ---- configuration tables: one pass finds all four pointers ---------- */
 
 static uint64_t g_ct_acpi20, g_ct_acpi10, g_ct_smbios3, g_ct_smbios;
 static bool g_ct_done;
@@ -124,8 +103,6 @@ static void scan_config_tables(void)
     }
 }
 
-/* ---- ACPI ------------------------------------------------------------- */
-
 static struct acpi_info g_acpi;
 static bool g_acpi_done;
 
@@ -135,15 +112,12 @@ const struct acpi_info *discover_acpi(void)
         g_acpi_done = true;
         discover_memory();
         scan_config_tables();
-        /* Prefer the 2.0+ RSDP (XSDT, 64-bit pointers); fall back to 1.0. */
         if (!(g_ct_acpi20 && acpi_parse(g_ct_acpi20, uefi_phys_range_ok, &g_acpi) == ACPI_OK) &&
             !(g_ct_acpi10 && acpi_parse(g_ct_acpi10, uefi_phys_range_ok, &g_acpi) == ACPI_OK))
             memset(&g_acpi, 0, sizeof(g_acpi));
     }
     return &g_acpi;
 }
-
-/* ---- SMBIOS ----------------------------------------------------------- */
 
 static struct smbios_info g_smbios;
 static bool g_smbios_done;
@@ -160,10 +134,6 @@ const struct smbios_info *discover_smbios(void)
     }
     return &g_smbios;
 }
-
-/* ---- graphics: the current GOP mode, never SetMode -------------------
- * Startup's con_pick_mode may already have changed it through the text
- * console; this reads whatever the firmware ended up with. */
 
 static struct boot_framebuffer g_fb;
 static bool g_fb_done;
@@ -217,7 +187,7 @@ const struct boot_framebuffer *discover_graphics(void)
         mask_to_field(info->PixelInformation.GreenMask, &fb.green_shift, &fb.green_size);
         mask_to_field(info->PixelInformation.BlueMask, &fb.blue_shift, &fb.blue_size);
         break;
-    default: /* PixelBltOnly: no linear framebuffer */
+    default:
         return &g_fb;
     }
 
@@ -228,8 +198,6 @@ const struct boot_framebuffer *discover_graphics(void)
     fb.pitch = info->PixelsPerScanLine * 4;
     fb.bpp = 32;
 
-    /* Reject modes whose geometry does not fit the buffer, and buffers
-     * that claim to sit in RAM firmware will hand to the kernel. */
     if (!fb.base || !fb.width || !fb.height || info->PixelsPerScanLine < fb.width ||
         (uint64_t)fb.pitch * fb.height > fb.size || fb.size > UINT64_MAX - fb.base)
         return &g_fb;
@@ -240,8 +208,6 @@ const struct boot_framebuffer *discover_graphics(void)
     g_fb = fb;
     return &g_fb;
 }
-
-/* ---- storage: describe the boot volume from its device path ----------- */
 
 static struct boot_device g_dev;
 static bool g_dev_done;
@@ -272,7 +238,6 @@ const struct boot_device *discover_storage(void)
     g_dev_done = true;
 
     if (!EFI_ERROR(g_uefi.bs->HandleProtocol(dev, &guid_devpath, (void **)&node)) && node) {
-        /* Bounded walk: at most 64 nodes, each at least 4 bytes. */
         for (unsigned i = 0; i < 64 && node[0] != DP_TYPE_END; i++) {
             uint16_t len = rd16(node + 2);
             if (len < 4)
@@ -280,7 +245,7 @@ const struct boot_device *discover_storage(void)
             if (node[0] == DP_TYPE_MESSAGING) {
                 uint32_t itf = messaging_interface(node[1]);
                 if (itf != BOOT_DEV_UNKNOWN)
-                    g_dev.interface = itf; /* innermost controller wins */
+                    g_dev.interface = itf;
             } else if (node[0] == DP_TYPE_MEDIA && node[1] == DP_MEDIA_HD && len >= 42) {
                 g_dev.partition_number = rd32(node + 4);
                 g_dev.partition_start_lba = rd64(node + 8);
@@ -300,18 +265,15 @@ const struct boot_device *discover_storage(void)
     return &g_dev;
 }
 
-/* ---- Intel CSME: HECI1 at PCI 00:16.0 --------------------------------- */
-
 #define HECI_DEVFN   ((0x16u << 3) | 0)
-#define MCFG_ENTRIES 44 /* SDT header + 8 reserved bytes */
+#define MCFG_ENTRIES 44
 #define MCFG_ENTRY   16
 
 static struct boot_csme g_csme;
 static struct csme_clients g_csme_clients;
 static bool g_csme_done;
-static uint64_t g_heci_ecam; /* HECI1's 4 KiB of ECAM, 0: use ports 0xCF8/0xCFC */
+static uint64_t g_heci_ecam;
 
-/* ECAM base for segment 0, bus 0 from the ACPI MCFG table, 0 if none. */
 static uint64_t ecam_bus0(void)
 {
     const struct acpi_info *a = discover_acpi();
@@ -320,14 +282,12 @@ static uint64_t ecam_bus0(void)
 
     for (uint32_t off = MCFG_ENTRIES; t && off + MCFG_ENTRY <= len; off += MCFG_ENTRY) {
         const uint8_t *e = (const uint8_t *)(uintptr_t)t + off;
-        if (rd16(e + 8) == 0 && e[10] == 0) /* segment 0, start bus 0 */
+        if (rd16(e + 8) == 0 && e[10] == 0)
             return rd64(e);
     }
     return 0;
 }
 
-/* Mechanism #1 uses two ports; TPL_HIGH_LEVEL keeps firmware timer events
- * from reprogramming 0xCF8 between them. ECAM is one access, no lock. */
 static uint32_t heci_cfg_read32(uint16_t off)
 {
     uint32_t v;
@@ -370,17 +330,12 @@ const struct boot_csme *discover_csme(void)
     if (g_csme_done)
         return &g_csme;
     g_csme_done = true;
-    /* 00:16.0 is HECI only on Intel chipsets; elsewhere it may be some
-     * other device, which is left alone. */
     if (memcmp(discover_cpu()->vendor, "GenuineIntel", 12) != 0)
         return &g_csme;
     if ((ecam = ecam_bus0()) != 0)
         g_heci_ecam = ecam + ((uint64_t)HECI_DEVFN << 12);
     csme_probe(&ops, &g_csme);
 #if BOOT_CSME_QUERY
-    /* The firmware's own HECI driver may run from timer events; at
-     * TPL_HIGH_LEVEL none can start mid-exchange. Stall is allowed at this
-     * level. A CSME that never answers holds it for each 1 s timeout. */
     {
         UINTN tpl = g_uefi.bs->RaiseTPL(TPL_HIGH_LEVEL);
         csme_query_version(&ops, &g_csme);
@@ -391,13 +346,10 @@ const struct boot_csme *discover_csme(void)
     return &g_csme;
 }
 
-/* What the HBM session found; count == 0 before discover_csme or without one. */
 const struct csme_clients *discover_csme_clients(void)
 {
     return &g_csme_clients;
 }
-
-/* ---- CPUs: the ACPI MADT -------------------------------------------------- */
 
 static struct smp_madt_cpu g_smp_cpu[SMP_MAX_CPUS];
 static struct smp_cpus g_smp = {0, 0, g_smp_cpu};

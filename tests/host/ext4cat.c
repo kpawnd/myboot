@@ -1,22 +1,10 @@
-/*
- * Host test for src/fs/ext4.c: reads files from a disk image through the
- * loader's own driver, so tests/fs.py can compare them with what an
- * independent reader (7-Zip) extracts.
- *
- *   ext4cat IMAGE OFFSET SIZE LIST OUTDIR
- *
- * The filesystem starts at byte OFFSET of IMAGE and is SIZE bytes long.
- * LIST holds one absolute path per line; file i of the list is written to
- * OUTDIR/i, or reported on stdout as "i ERROR <reason>". Every file is read
- * twice, whole and in chunks of awkward sizes, and the two must agree.
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "fs/ext4.h"
 
 struct filedev {
-    struct blockdev dev; /* first: the driver's pointer converts back */
+    struct blockdev dev;
     FILE *f;
     unsigned long long base;
 };
@@ -66,7 +54,7 @@ int main(int argc, char **argv)
             printf("%lu ERROR %s\n", n++, fs_strerror(e));
             continue;
         }
-        if (f.size > (64u << 20)) { /* corrupt sizes in the fuzz tests */
+        if (f.size > (64u << 20)) {
             printf("%lu ERROR larger than the harness reads\n", n++);
             continue;
         }

@@ -1,28 +1,7 @@
-/*
- * AP startup trampoline (Intel SDM vol. 3A 9.9 "Mode switching"). Never run
- * in place: smp_tramp_install copies [smp_tramp_start, smp_tramp_end) to a
- * page below 1 MiB and fills in the data block. A SIPI with that page's
- * number starts an AP in real mode at CS = page >> 4, IP = 0.
- *
- *   real mode -> protected mode (flat, this page's GDT)
- *             -> CR4, CR3 (the kernel's tables), EFER.LME, PAT, CR0.PG:
- *                long mode, still on this page (identity-mapped there)
- *             -> 64-bit: kernel GDT, find our boot_smp_cpu by APIC ID,
- *                its stack, XCR0, mark it parked, spin on goto_address.
- *
- * Every AP runs this at once, so the page is written only by locked
- * increments of the D_SEEN* counters (how many APs reached 16-, 32- and
- * 64-bit code); otherwise each AP writes only its own boot_smp_cpu entry.
- * D_STOP, if not 0, halts every AP at that point instead (1: 16-bit,
- * 2: 32-bit, 3: 64-bit, 4: just before parking), for diagnosis.
- * EBX/R15 hold the page's linear address throughout.
- *
- * The data block's layout is struct tramp_data in smp.c; the offsets
- * below must match it.
- */
-    .set D_GDT32,    8    /* limit:16, base:32 */
+/* AP startup trampoline (Intel SDM vol. */
+    .set D_GDT32,    8
     .set D_STOP,     14
-    .set D_FAR32,    16   /* offset:32, selector:16 */
+    .set D_FAR32,    16
     .set D_FAR64,    24
     .set D_CR3,      32
     .set D_CR4,      40
@@ -30,7 +9,7 @@
     .set D_EFER,     56
     .set D_PAT,      64
     .set D_XCR0,     72
-    .set D_GDT64,    80   /* limit:16, base:64 */
+    .set D_GDT64,    80
     .set D_SEEN16,   90
     .set D_SEEN32,   92
     .set D_SEEN64,   94
@@ -38,7 +17,6 @@
     .set D_NCPUS,    104
     .set GDT32,      112
 
-    /* struct boot_smp_cpu */
     .set CPU_SIZE,   64
     .set CPU_ID,     0
     .set CPU_STATE,  8
@@ -54,9 +32,9 @@ smp_tramp_start:
     jmp     start16
     .org    GDT32
     .quad   0
-    .quad   0x00CF9A000000FFFF      /* 0x08: 32-bit code, flat */
-    .quad   0x00CF92000000FFFF      /* 0x10: data, flat */
-    .quad   0x00AF9A000000FFFF      /* 0x18: 64-bit code */
+    .quad   0x00CF9A000000FFFF
+    .quad   0x00CF92000000FFFF
+    .quad   0x00AF9A000000FFFF
 start16:
     cli
     cld
@@ -69,7 +47,7 @@ start16:
     je      halt16
     lgdtl   (D_GDT32)
     movl    %cr0, %eax
-    orl     $1, %eax                /* PE */
+    orl     $1, %eax
     movl    %eax, %cr0
     ljmpl   *(D_FAR32)
 halt16:
@@ -86,19 +64,19 @@ smp_tramp_pm32:
     lock incw D_SEEN32(%ebx)
     cmpw    $2, D_STOP(%ebx)
     je      halt32
-    movl    D_CR4(%ebx), %eax       /* PAE (and LA57) before paging */
+    movl    D_CR4(%ebx), %eax
     movl    %eax, %cr4
     movl    D_CR3(%ebx), %eax
     movl    %eax, %cr3
-    movl    $0xC0000080, %ecx       /* EFER: LME, NXE */
+    movl    $0xC0000080, %ecx
     rdmsr
     orl     D_EFER(%ebx), %eax
     wrmsr
-    movl    $0x277, %ecx            /* PAT, before any PTE is used */
+    movl    $0x277, %ecx
     movl    D_PAT(%ebx), %eax
     movl    D_PAT+4(%ebx), %edx
     wrmsr
-    movl    D_CR0(%ebx), %eax       /* PG: long mode is now active */
+    movl    D_CR0(%ebx), %eax
     movl    %eax, %cr0
     ljmpl   *D_FAR64(%ebx)
 halt32:
@@ -114,8 +92,6 @@ smp_tramp_lm64:
     je      dead
     lgdt    D_GDT64(%r15)
 
-    /* Our APIC ID: the x2APIC ID from leaf 0Bh when it is there, as the
-     * loader's MADT list and boot_cpu.bsp_apic_id use it, else CPUID.1. */
     xorl    %eax, %eax
     cpuid
     cmpl    $0x0B, %eax
@@ -140,14 +116,14 @@ smp_tramp_lm64:
     addq    $CPU_SIZE, %rsi
     decq    %rcx
     jmp     3b
-dead:                               /* not in the list: nothing to run */
+dead:
     cli
     hlt
     jmp     dead
 
 found:
     movq    CPU_STACK(%rsi), %rsp
-    pushq   $0x08                   /* reload CS from the kernel GDT */
+    pushq   $0x08
     leaq    4f(%rip), %rax
     pushq   %rax
     lretq
@@ -173,6 +149,6 @@ found:
     jz      6b
     movq    %rsi, %rdi
     xorl    %ebp, %ebp
-    pushq   $0                      /* fake return address, as for the BSP */
+    pushq   $0
     jmpq    *%rax
 smp_tramp_end:

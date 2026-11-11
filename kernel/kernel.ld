@@ -1,15 +1,10 @@
-/*
- * Test kernel layout: three PT_LOAD segments with distinct permissions so
- * the loader's W^X mapping can be verified from inside the kernel.
- * Linked in the top 2 GiB (-mcmodel=kernel), as the boot protocol requires.
- */
 ENTRY(_start)
 
 PHDRS
 {
-    text   PT_LOAD FLAGS(5);  /* R-X */
-    rodata PT_LOAD FLAGS(4);  /* R-- */
-    data   PT_LOAD FLAGS(6);  /* RW- */
+    text   PT_LOAD FLAGS(5);
+    rodata PT_LOAD FLAGS(4);
+    data   PT_LOAD FLAGS(6);
 }
 
 SECTIONS

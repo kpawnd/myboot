@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""
-Corrupts ext2/ext4 test images at random and reads them with the driver
-built with AddressSanitizer and UBSan (build/host/ext4cat-asan.exe). The
-driver may refuse a corrupt image, but must never crash, read out of
-bounds or hang.
-
-  fuzz.py [ITERATIONS] [SEED]
-
-A failing image is kept as build/host/fuzz/crash-<n>.img.
-"""
 import glob
 import os
 import random
@@ -22,15 +12,12 @@ PATHS = ["/boot/kernel.elf", "/boot/selftest.mod", "/holes.bin", "/links/long",
          "/links/chain", "/links/dir/file-with-a-longer-name-150", "/links/loop1",
          "/many/file-with-a-longer-name-299", "/lost+found", "/nope/x"]
 
-
 def asan_env():
-    """The sanitizer runtime is a DLL next to clang's other libraries."""
     env = dict(os.environ)
     llvm = os.environ.get("LLVM_DIR", "C:/Program Files/LLVM")
     for dll in glob.glob(llvm + "/lib/clang/*/lib/windows/clang_rt.asan_dynamic-x86_64.dll"):
         env["PATH"] = os.path.dirname(dll) + os.pathsep + env["PATH"]
     return env
-
 
 def main():
     env = asan_env()
@@ -52,9 +39,6 @@ def main():
         base = os.path.join(OUT, name + ".img")
         subprocess.run([sys.executable, "tests/tools/mkext4.py", base] + payload + args, check=True)
         orig = open(base, "rb").read()
-        # Bytes that differ from zero in the first part of the image are
-        # mostly metadata: superblock, descriptors, inodes, directories,
-        # extent nodes and indirect blocks.
         hot = [i for i in range(min(len(orig), 2 * 1024 * 1024)) if orig[i]]
         for it in range(iterations):
             img = bytearray(orig)
@@ -79,7 +63,6 @@ def main():
                     sys.exit(1)
         print("%s  fuzz %s: %d corrupted images" % ("FAIL" if failures else "PASS", name, iterations))
     sys.exit(1 if failures else 0)
-
 
 if __name__ == "__main__":
     main()

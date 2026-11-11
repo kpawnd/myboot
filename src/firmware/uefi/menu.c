@@ -1,49 +1,21 @@
-/*
- * Boot menu and recovery screen on the firmware console.
- *
- *   Up/Down, Home/End  move the selection (wraps around)
- *   Enter              activate the selected item
- *   1-9                boot that entry at once
- *   e                  edit the selected entry's command line, then boot it
- *   any key            stops the countdown
- *
- * Besides the BOOT.CFG entries the menu offers Firmware setup (when the
- * firmware supports OsIndications), Reboot, Power off and Return to
- * firmware (its boot manager then tries the next boot option).
- *
- * The normal menu appears only when BOOT.CFG sets a timeout or a key is
- * already waiting, so a plain boot never waits for the keyboard. The
- * recovery screen appears when every entry failed to load; its countdown
- * returns to the firmware, so an unattended machine still moves on to its
- * next boot option.
- *
- * With a background picture in BOOT.CFG (and GOP, and no errors to show)
- * the normal menu is drawn over the picture in a panel on the right; the
- * command-line editor and the recovery screen stay on the text console.
- * The text menu is still written once underneath, so a serial console
- * sees it.
- *
- * Keys are polled (ReadKeyStroke never blocks) between short Stalls: no
- * events or timers. Output exists in every build configuration.
- */
+/* Boot menu and recovery screen on the firmware console. */
 #include <stdbool.h>
 #include "firmware/uefi_boot.h"
 #include "firmware/uefi_console.h"
 #include "lib/mem.h"
 
 #define MENU_TICK_US     10000
-#define RECOVERY_TIMEOUT 10  /* seconds before the recovery screen gives up */
-#define WATCHDOG_DEFAULT 300 /* seconds: what the boot manager arms (UEFI 3.1.2) */
+#define RECOVERY_TIMEOUT 10
+#define WATCHDOG_DEFAULT 300
 #define ATTR_NORMAL      EFI_LIGHTGRAY
 #define ATTR_TITLE       EFI_WHITE
-#define ATTR_SELECTED    EFI_BACKGROUND_LIGHTGRAY /* black on light grey */
-/* graphical menu colours, taken from the shipped background */
+#define ATTR_SELECTED    EFI_BACKGROUND_LIGHTGRAY
 #define GFX_TEXT         0xEDE3CF
 #define GFX_DIM          0x9C8F86
 #define GFX_ACCENT       0xE07A9A
 #define GFX_SEL_TEXT     0x1A1014
 #define GFX_BORDER       0x7A4256
-#define GFX_COLS         46 /* panel width in characters, if the screen allows */
+#define GFX_COLS         46
 
 static EFI_GUID guid_global = {0x8BE4DF61, 0x93CA, 0x11D2, {0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C}};
 
@@ -60,25 +32,23 @@ struct menu {
     const struct boot_config *cfg;
     EFI_SIMPLE_TEXT_INPUT_PROTOCOL *in;
     bool     recovery;
-    uint32_t special[4];   /* enum item, after the entries */
+    uint32_t special[4];
     uint32_t nspecial;
     uint32_t nitems;
     uint32_t sel;
     uint32_t cols, rows;
-    uint32_t top;          /* row of the first item */
+    uint32_t top;
     uint32_t help_row;
     bool     counting;
     uint64_t left_us;
     uint64_t shown_secs;
-    const char *message;   /* replaces the status line until the next key */
-    bool     gfx;          /* drawn over the background picture */
-    uint32_t gx, gy, gw;   /* panel position and width, pixels */
-    uint32_t gpad, glh;    /* panel's side padding, line height */
+    const char *message;
+    bool     gfx;
+    uint32_t gx, gy, gw;
+    uint32_t gpad, glh;
 };
 
 static char g_edit[CFG_CMDLINE_MAX + 1];
-
-/* ---- small text helpers --------------------------------------------- */
 
 struct text {
     char  buf[160];
@@ -114,8 +84,6 @@ static void row_text(uint32_t row, uint32_t attr, const char *s, uint32_t width)
     con_attr(ATTR_NORMAL);
 }
 
-/* ---- firmware actions ------------------------------------------------- */
-
 static bool fw_setup_supported(void)
 {
     EFI_RUNTIME_SERVICES *rt = g_uefi.st->RuntimeServices;
@@ -127,7 +95,6 @@ static bool fw_setup_supported(void)
            (v & EFI_OS_INDICATIONS_BOOT_TO_FW_UI);
 }
 
-/* UEFI 8.5.4: set the BOOT_TO_FW_UI bit of OsIndications, then reset. */
 static const char *enter_fw_setup(void)
 {
     EFI_RUNTIME_SERVICES *rt = g_uefi.st->RuntimeServices;
@@ -153,8 +120,6 @@ static const char *reset(uint32_t type)
     return "Reset failed.";
 }
 
-/* ---- drawing ---------------------------------------------------------- */
-
 static uint32_t item_kind(const struct menu *m, uint32_t i)
 {
     return i < m->cfg->nentries ? ITEM_ENTRY : m->special[i - m->cfg->nentries];
@@ -162,11 +127,9 @@ static uint32_t item_kind(const struct menu *m, uint32_t i)
 
 static uint32_t item_row(const struct menu *m, uint32_t i)
 {
-    /* one blank row between the entries and the built-in items */
     return m->top + i + (i >= m->cfg->nentries ? 1 : 0);
 }
 
-/* "1) Title" or "   Reboot" */
 static void item_text(const struct menu *m, uint32_t i, struct text *t)
 {
     const struct cfg_entry *e;
@@ -182,7 +145,6 @@ static void item_text(const struct menu *m, uint32_t i, struct text *t)
     }
 }
 
-/* `brief`: for the graphical panel, narrower than a text screen */
 static void status_text(const struct menu *m, struct text *t, bool brief)
 {
     if (m->message)
@@ -195,8 +157,6 @@ static void status_text(const struct menu *m, struct text *t, bool brief)
         t_str(t, brief ? " s. Any key stops." : " s. Press any key to stop.");
     }
 }
-
-/* ---- text console ---- */
 
 static void text_item(const struct menu *m, uint32_t i)
 {
@@ -225,8 +185,6 @@ static void text_draw(struct menu *m)
     row_text(0, ATTR_TITLE, m->recovery ? "MYBOOT: no entry could be loaded" : "MYBOOT boot menu",
              m->cols - 1);
 
-    /* Rows: title, blank, errors (+ blank), items, blank, help, blank,
-     * status. Errors get whatever the items leave free. */
     avail = m->rows > m->nitems + 8 ? m->rows - (m->nitems + 8) : 0;
     nerr = boot_errors_draw(2, avail, m->cols - 1);
     m->top = 2 + nerr + (nerr ? 1 : 0);
@@ -238,10 +196,6 @@ static void text_draw(struct menu *m)
     text_status(m);
 }
 
-/* ---- over the background picture ---- */
-
-/* Panel lines: title, blank, entries, blank, built-in items, blank, two
- * help lines, blank, status. */
 static uint32_t gfx_item_line(const struct menu *m, uint32_t i)
 {
     return 2 + i + (i >= m->cfg->nentries ? 1 : 0);
@@ -249,7 +203,7 @@ static uint32_t gfx_item_line(const struct menu *m, uint32_t i)
 
 static uint32_t gfx_y(const struct menu *m, uint32_t line)
 {
-    return m->gy + m->glh + line * m->glh; /* one line of padding on top */
+    return m->gy + m->glh + line * m->glh;
 }
 
 static void gfx_line(const struct menu *m, uint32_t line, const char *s, uint32_t fg)
@@ -257,8 +211,6 @@ static void gfx_line(const struct menu *m, uint32_t line, const char *s, uint32_
     gfx_text(m->gx + m->gpad, gfx_y(m, line), m->gw - 2 * m->gpad, 0, s, fg, GFX_NONE);
 }
 
-/* Place the panel on the right, where the shipped picture is dark, and
- * darken the picture under it. False if the screen is too small. */
 static bool gfx_layout(struct menu *m)
 {
     uint32_t w, h, scale, cw, margin, cols = GFX_COLS, lines, gh;
@@ -287,7 +239,6 @@ static void gfx_item(const struct menu *m, uint32_t i)
     bool sel = i == m->sel;
 
     item_text(m, i, &t);
-    /* the bar reaches halfway into the padding */
     gfx_text(m->gx + m->gpad / 2, gfx_y(m, gfx_item_line(m, i)), m->gw - m->gpad, m->gpad / 2,
              t.buf, sel ? GFX_SEL_TEXT : GFX_TEXT, sel ? GFX_ACCENT : GFX_NONE);
 }
@@ -313,8 +264,6 @@ static void gfx_draw(const struct menu *m)
     gfx_status(m);
 }
 
-/* ---- either ---- */
-
 static void draw_item(const struct menu *m, uint32_t i)
 {
     if (m->gfx)
@@ -331,9 +280,6 @@ static void draw_status(struct menu *m)
         text_status(m);
 }
 
-/* The text menu is drawn in both modes: OVMF and many firmwares copy the
- * console to a serial port, which then shows the menu too. The picture
- * covers it at once. */
 static void draw(struct menu *m)
 {
     text_draw(m);
@@ -341,10 +287,6 @@ static void draw(struct menu *m)
         gfx_draw(m);
 }
 
-/* ---- input ------------------------------------------------------------ */
-
-/* Next key, ticking the countdown while it runs. Returns false when the
- * countdown expires. The first key stops the countdown for good. */
 static bool next_key(struct menu *m, EFI_INPUT_KEY *key)
 {
     for (;;) {
@@ -370,8 +312,6 @@ static bool next_key(struct menu *m, EFI_INPUT_KEY *key)
     }
 }
 
-/* Single-line editor with horizontal scrolling. Returns true to boot with
- * the edited line, false to go back to the menu. */
 static bool edit_cmdline(struct menu *m, uint32_t idx, struct menu_choice *out)
 {
     const struct cfg_entry *e = &m->cfg->entry[idx];
@@ -422,7 +362,7 @@ static bool edit_cmdline(struct menu *m, uint32_t idx, struct menu_choice *out)
             cur = 0;
         else if (key.ScanCode == SCAN_END)
             cur = len;
-        else if (key.UnicodeChar == 0x08 && cur > 0) { /* Backspace */
+        else if (key.UnicodeChar == 0x08 && cur > 0) {
             memmove(g_edit + cur - 1, g_edit + cur, len - cur);
             g_edit[--len] = 0;
             cur--;
@@ -437,14 +377,10 @@ static bool edit_cmdline(struct menu *m, uint32_t idx, struct menu_choice *out)
     }
 }
 
-/* ---- the menu loop ------------------------------------------------------ */
-
 static void run(struct menu *m, struct menu_choice *out)
 {
     EFI_INPUT_KEY key;
 
-    /* The firmware watchdog would reset the machine while a person reads
-     * the menu; re-armed with its default once a choice is made. */
     g_uefi.bs->SetWatchdogTimer(0, 0, 0, NULL);
     if (fw_setup_supported())
         m->special[m->nspecial++] = ITEM_FW_SETUP;
@@ -452,14 +388,12 @@ static void run(struct menu *m, struct menu_choice *out)
     m->special[m->nspecial++] = ITEM_POWEROFF;
     m->special[m->nspecial++] = ITEM_RETURN;
     m->nitems = m->cfg->nentries + m->nspecial;
-    /* Loading the picture is logged; errors (its own included) need the
-     * text menu, which lists them. */
     m->gfx = !m->recovery && m->cfg->background && gfx_open(m->cfg->background);
     if (m->gfx && (boot_errors_count() || !gfx_layout(m))) {
         gfx_close();
         m->gfx = false;
     }
-    con_log_pause(1); /* screen drawing is not log */
+    con_log_pause(1);
     con_size(&m->cols, &m->rows);
     m->shown_secs = (m->left_us + 999999) / 1000000;
     draw(m);
@@ -468,7 +402,6 @@ static void run(struct menu *m, struct menu_choice *out)
         uint32_t kind;
 
         if (!next_key(m, &key)) {
-            /* Countdown expired: boot the default, or give up. */
             out->action = m->recovery ? MENU_RETURN : MENU_BOOT;
             out->entry = m->cfg->default_entry;
             break;
@@ -540,11 +473,11 @@ void menu_choose(const struct boot_config *c, struct menu_choice *out, void (*pr
     if (c->timeout) {
         m.counting = true;
         m.left_us = (uint64_t)c->timeout * 1000000;
-        m.in->Reset(m.in, 0); /* drop keys pressed before the menu appeared */
+        m.in->Reset(m.in, 0);
     } else if (EFI_ERROR(m.in->ReadKeyStroke(m.in, &key))) {
-        return; /* no menu, no key held: boot the default without waiting */
+        return;
     }
-    prepare(); /* may add entries; before run() counts them */
+    prepare();
     run(&m, out);
 }
 
@@ -556,10 +489,10 @@ void menu_recover(const struct boot_config *c, struct menu_choice *out, void (*p
     memset(out, 0, sizeof(*out));
     out->action = MENU_RETURN;
     if (!m.in) {
-        g_uefi.bs->Stall(3000000); /* no keyboard: leave the errors readable */
+        g_uefi.bs->Stall(3000000);
         return;
     }
     m.in->Reset(m.in, 0);
-    prepare(); /* may add entries; before run() counts them */
+    prepare();
     run(&m, out);
 }

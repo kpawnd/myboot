@@ -1,14 +1,3 @@
-/*
- * Graphical menu screen: the BOOT.CFG background picture, scaled to cover
- * the screen, with text drawn over it. Everything reaches the screen
- * through GOP Blt (UEFI 12.9), so the framebuffer's pixel format does not
- * matter and Blt-only adapters work too.
- *
- * The picture is decoded once into a screen-sized buffer (`g_bg`); a line
- * of text is composed in `g_line` from the picture under it, an optional
- * bar and the glyphs, then sent with one Blt. Text is font8x8 with each
- * dot drawn as scale x scale pixels.
- */
 #include "core/util.h"
 #include "firmware/uefi_boot.h"
 #include "image/jpeg.h"
@@ -43,12 +32,9 @@ static void release(void *p, uint64_t pages)
         g_uefi.bs->FreePages((EFI_PHYSICAL_ADDRESS)(uintptr_t)p, pages);
 }
 
-/* Scale the iw x ih picture to cover the screen, keeping its aspect ratio
- * and cutting the overhang evenly. Each screen pixel is the average of the
- * picture pixels it covers, so shrinking does not alias. */
 static void cover(const uint32_t *img, uint32_t iw, uint32_t ih)
 {
-    uint64_t sw = iw, sh = ih, sx = 0, sy = 0; /* the part of the picture shown */
+    uint64_t sw = iw, sh = ih, sx = 0, sy = 0;
 
     if ((uint64_t)iw * g_h > (uint64_t)ih * g_w) {
         sw = (uint64_t)ih * g_w / g_h;
@@ -84,7 +70,6 @@ static void cover(const uint32_t *img, uint32_t iw, uint32_t ih)
     }
 }
 
-/* Read and decode the file into g_bg. False after a boot_error. */
 static bool load(const char *cfg_path)
 {
     char path[CFG_RESOLVED_MAX];
@@ -133,12 +118,11 @@ bool gfx_open(const char *cfg_path)
 
     if (EFI_ERROR(g_uefi.bs->LocateProtocol(&guid_gop, NULL, (void **)&g_gop)) || !g_gop ||
         !g_gop->Mode || !(info = g_gop->Mode->Info))
-        return false; /* no graphics: the text menu is all there is */
+        return false;
     g_w = info->HorizontalResolution;
     g_h = info->VerticalResolution;
     if (g_w < 320 || g_h < 200 || g_w > 16384 || g_h > 16384)
         return false;
-    /* 8x8 dots: 16 px glyphs at 1080 lines, 8 px at 600 */
     g_scale = g_h / 384 ? g_h / 384 : 1;
 
     if (!(g_bg = alloc((uint64_t)g_w * g_h * 4, &g_bg_pages)) ||
@@ -171,7 +155,6 @@ void gfx_geometry(uint32_t *width, uint32_t *height, uint32_t *scale)
 
 static uint32_t darken(uint32_t p)
 {
-    /* 3/8 of each channel */
     return ((p >> 16 & 0xFF) * 3 / 8) << 16 | ((p >> 8 & 0xFF) * 3 / 8) << 8 | (p & 0xFF) * 3 / 8;
 }
 

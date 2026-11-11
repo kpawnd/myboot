@@ -1,18 +1,11 @@
-/*
- * Page-size trade-off used by the boot protocol:
- *   4 KiB  kernel segments: exact W^X per segment; one 4 KiB table per 2 MiB.
- *   2 MiB  HHDM fallback: one 4 KiB table per GiB mapped.
- *   1 GiB  HHDM when CPUID reports PDPE1GB: one 4 KiB table per 512 GiB.
- * Large pages also cut TLB misses for the kernel's early HHDM accesses.
- */
 #include "arch/x86_64/paging.h"
 #include "core/util.h"
 #include "lib/mem.h"
 
 #define PTE_P    (1ull << 0)
 #define PTE_W    (1ull << 1)
-#define PTE_PWT  (1ull << 3)  /* PWT and PCD: same bit at every level, unlike the PAT bit */
-#define PTE_PS   (1ull << 7)  /* large page at PDPT (1 GiB) / PD (2 MiB) level */
+#define PTE_PWT  (1ull << 3)
+#define PTE_PS   (1ull << 7)
 #define PTE_NX   (1ull << 63)
 #define PTE_ADDR 0x000FFFFFFFFFF000ull
 
@@ -27,8 +20,6 @@ static uint64_t *pt_alloc(struct pt_builder *b)
     return t;
 }
 
-/* Return the table referenced by t[idx], creating it if absent. Intermediate
- * entries are present+writable and never NX: leaf entries decide access. */
 static uint64_t *pt_next(struct pt_builder *b, uint64_t *t, unsigned idx)
 {
     uint64_t e = t[idx];
@@ -53,9 +44,6 @@ bool pt_init(struct pt_builder *b, void *pool, uint32_t pool_pages, bool la57, b
         return false;
     b->root = b->pml4;
     if (la57) {
-        /* With 5-level paging only PML5 slots 0 (low canonical half) and
-         * 511 (high half) are used, and both lead to the same PML4: bits
-         * 47:39 then index it exactly as in 4-level mode. */
         if (!(b->root = pt_alloc(b)))
             return false;
         b->root[0] = b->root[511] = (uint64_t)(uintptr_t)b->pml4 | PTE_P | PTE_W;
@@ -98,8 +86,6 @@ bool pt_map(struct pt_builder *b, uint64_t virt, uint64_t phys, uint64_t size,
             return false;
         e = &pt[(virt >> 12) & 511];
         if (*e & PTE_P) {
-            /* A page shared by two segments (one ends, the next begins in
-             * the same 4 KiB): union of the permissions. */
             if ((*e & PTE_ADDR) != phys)
                 return false;
             *e |= leaf & PTE_W;
@@ -116,14 +102,14 @@ bool pt_map(struct pt_builder *b, uint64_t virt, uint64_t phys, uint64_t size,
 uint32_t pt_pages_bound(uint64_t kernel_span, uint64_t hhdm_size, bool hhdm_1g, bool la57,
                         uint64_t fb_size)
 {
-    uint64_t n = 1 + (la57 ? 1 : 0);                  /* PML4 (+ PML5) */
+    uint64_t n = 1 + (la57 ? 1 : 0);
 
-    n += 9;                                           /* identity windows: 3 x (PDPT, PD, PT) */
-    n += (hhdm_size + GiB(512) - 1) / GiB(512);       /* HHDM PDPTs */
+    n += 9;
+    n += (hhdm_size + GiB(512) - 1) / GiB(512);
     if (!hhdm_1g)
-        n += (hhdm_size + GiB(1) - 1) / GiB(1);       /* HHDM PDs */
-    n += 1 + 2 + kernel_span / MiB(2) + 2;            /* kernel PDPT, PDs, PTs */
-    if (fb_size)                                      /* framebuffer beyond the HHDM */
-        n += 2 + fb_size / GiB(1) + 2 + 2;            /* PDPTs, PDs, head/tail PTs */
+        n += (hhdm_size + GiB(1) - 1) / GiB(1);
+    n += 1 + 2 + kernel_span / MiB(2) + 2;
+    if (fb_size)
+        n += 2 + fb_size / GiB(1) + 2 + 2;
     return (uint32_t)n;
 }

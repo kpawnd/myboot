@@ -1,10 +1,4 @@
-/*
- * Boot-phase timing points. With BOOT_PROFILE=0 every macro expands to
- * nothing: no array, no RDTSC, no code.
- *
- * Each point records the TSC when a phase *ends*; phase i lasted
- * g_prof[i] - g_prof[i - 1].
- */
+/* Boot-phase timing points. */
 #ifndef CORE_PROF_H
 #define CORE_PROF_H
 
@@ -13,18 +7,18 @@
 #include "arch/x86_64/cpu.h"
 
 enum prof_point {
-    PROF_ENTRY,     /* loader entry */
-    PROF_CPU,       /* CPUID discovery */
-    PROF_TSC_CAL,   /* TSC calibration (only when CPUID gives no frequency) */
-    PROF_MEMORY,    /* first memory map read */
-    PROF_ACPI,      /* configuration table scan + RSDP/XSDT validation */
+    PROF_ENTRY,
+    PROF_CPU,
+    PROF_TSC_CAL,
+    PROF_MEMORY,
+    PROF_ACPI,
     PROF_SMBIOS,
-    PROF_GRAPHICS,  /* GOP query */
-    PROF_STORAGE,   /* boot device path + BlockIo */
-    PROF_CSME,      /* HECI config space, and the firmware version query */
-    PROF_CONFIG,    /* BOOT.CFG read and parse, plus any time spent in the menu */
-    PROF_KERNEL,    /* load the entry: kernel ELF and modules (incl. failed entries) */
-    PROF_PAGING,    /* arena, page tables, boot_info */
+    PROF_GRAPHICS,
+    PROF_STORAGE,
+    PROF_CSME,
+    PROF_CONFIG,
+    PROF_KERNEL,
+    PROF_PAGING,
     PROF_COUNT
 };
 

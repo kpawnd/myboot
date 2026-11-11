@@ -1,7 +1,3 @@
-/*
- * UEFI memory map access (UEFI 2.10 section 7.2, GetMemoryMap) and its
- * conversion to the boot protocol's types.
- */
 #include "firmware/uefi_boot.h"
 #include "core/util.h"
 
@@ -12,15 +8,12 @@ EFI_STATUS uefi_mmap_alloc(struct uefi_mmap *m, uint32_t slack_descs)
     UINTN need = 0;
     EFI_STATUS s;
 
-    /* A zero-size call reports the needed size and descriptor stride. */
     s = bs->GetMemoryMap(&need, NULL, &m->key, &m->desc_size, &m->desc_version);
     if (s != EFI_BUFFER_TOO_SMALL)
         return EFI_ERROR(s) ? s : EFI_LOAD_ERROR;
     if (m->desc_size < sizeof(EFI_MEMORY_DESCRIPTOR) || (m->desc_size & 7) || need > MiB(4))
         return EFI_UNSUPPORTED;
 
-    /* Slack absorbs descriptors created by our own later allocations (each
-     * can split one free range into three) and by firmware activity. */
     need += (UINTN)slack_descs * m->desc_size;
     m->pages = (uint32_t)((need + PAGE_SIZE - 1) / PAGE_SIZE);
     s = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, m->pages, &addr);
@@ -61,8 +54,6 @@ const EFI_MEMORY_DESCRIPTOR *uefi_mmap_desc(const struct uefi_mmap *m, uint32_t 
     return (const EFI_MEMORY_DESCRIPTOR *)(m->buf + (UINTN)i * m->desc_size);
 }
 
-/* End address of a descriptor, or 0 if it is malformed (unaligned, empty
- * or wrapping past 2^64). Such descriptors are ignored everywhere. */
 static uint64_t desc_end(const EFI_MEMORY_DESCRIPTOR *d)
 {
     uint64_t start = d->PhysicalStart;
@@ -102,7 +93,7 @@ static uint32_t boot_type(uint32_t efi_type)
     case EfiMemoryMappedIO:
     case EfiMemoryMappedIOPortSpace: return BOOT_MEM_MMIO;
     case EfiPersistentMemory:    return BOOT_MEM_PERSISTENT;
-    default:                     return BOOT_MEM_RESERVED; /* incl. unaccepted, OEM/OS types */
+    default:                     return BOOT_MEM_RESERVED;
     }
 }
 
@@ -137,10 +128,6 @@ uint32_t uefi_mmap_normalize(const struct uefi_mmap *m, struct boot_mem_entry *o
 
         if (!end)
             continue;
-        /* The kernel and modules are ordinary EfiLoaderData to firmware
-         * (custom memory types break some firmware), so carve them out
-         * here. One descriptor can hold several carves when firmware
-         * merged adjacent allocations. */
         if (type == BOOT_MEM_BOOTLOADER_RECLAIMABLE) {
             for (uint32_t c = 0; c < ncarve; c++) {
                 uint64_t cs = carve[c].base > pos ? carve[c].base : pos;

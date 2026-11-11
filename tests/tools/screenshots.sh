@@ -1,16 +1,5 @@
 #!/bin/sh
 # Screenshots of the loader for README.md; run through `make screenshots`.
-#
-# Boots the built ESP in QEMU with the monitor on stdin, waits for the menu
-# on the serial log, and saves PNGs with the monitor's screendump:
-#
-#   menu.png       the menu over the BOOT.CFG background picture
-#   menu-text.png  the same menu without a background (text console)
-#   editor.png     the command-line editor ('e')
-#   kernel-NN.png  the test kernel's screen, every 0.2 s until it exits;
-#                  pick the frame to keep by hand
-#
-# Output goes to $OUT (build/$CONFIG/screenshots).
 
 set -u
 CONFIG=${CONFIG:-balanced}
@@ -24,7 +13,6 @@ OUT=${OUT:-build/$CONFIG/screenshots}
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
-# wait_menu LOG: until the menu's key help is on the serial log.
 wait_menu() {
     i=0
     until [ -f "$1" ] && grep -aqF "Up/Down select" "$1"; do
@@ -37,7 +25,6 @@ wait_menu() {
 
 shot() { echo "screendump $OUT/$1.png -f png"; sleep 0.5; }
 
-# drive NAME: the monitor commands for one boot of $OUT/NAME.
 drive() {
     log=$OUT/$1.log
     wait_menu "$log" || return
@@ -60,7 +47,6 @@ drive() {
     fi
 }
 
-# boot NAME: copy the ESP to $OUT/NAME, optionally without the background.
 boot() {
     d=$OUT/$1
     cp -r "$ESP" "$d"

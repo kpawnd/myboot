@@ -1,12 +1,4 @@
-/*
- * File access (config, kernel, modules). FAT and other firmware-readable
- * volumes go through the firmware's Simple File System (UEFI 2.10 sections
- * 13.4-13.5): no FAT code of our own runs on the UEFI path. ext2/3/4
- * volumes go through our own driver (src/fs/ext4.c).
- *
- * Every byte read goes through kfile_read so the disk-read counters in
- * boot_info are complete.
- */
+/* File access (config, kernel, modules). */
 #include "firmware/uefi_boot.h"
 
 EFI_GUID g_guid_sfs = {0x964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
@@ -51,7 +43,6 @@ EFI_STATUS kfile_open_on(struct kfile *kf, struct uefi_vol *vol, const char *pat
     if (vol->fs != VOL_FS_FIRMWARE)
         return vol->fs_err ? fs_status(vol->fs_err) : EFI_UNSUPPORTED;
 
-    /* ASCII to UTF-16: config paths are validated printable ASCII. */
     for (i = 0; path[i]; i++) {
         if (i + 1 == CFG_RESOLVED_MAX)
             return EFI_INVALID_PARAMETER;
@@ -69,8 +60,6 @@ EFI_STATUS kfile_open_on(struct kfile *kf, struct uefi_vol *vol, const char *pat
         kf->file = 0;
         return s;
     }
-    /* Size without EFI_FILE_INFO (no buffer, no GetInfo): seeking to
-     * all-ones moves to end of file (13.5.13), then read the position. */
     if (EFI_ERROR(s = kf->file->SetPosition(kf->file, UINT64_MAX)) ||
         EFI_ERROR(s = kf->file->GetPosition(kf->file, &kf->size)))
         return s;
@@ -93,8 +82,6 @@ EFI_STATUS kfile_read(struct kfile *kf, uint64_t offset, void *dst, uint64_t len
     }
     if (EFI_ERROR(s = kf->file->SetPosition(kf->file, offset)))
         return s;
-    /* Read may legitimately return fewer bytes than asked; loop until done.
-     * A zero-byte return before the end means the file shrank or is corrupt. */
     while (len) {
         UINTN got = len;
         if (EFI_ERROR(s = kf->file->Read(kf->file, &got, p)))

@@ -1,17 +1,5 @@
 #!/bin/sh
 # Boot scenarios for one build configuration; run through `make test-all`.
-#
-# Each case builds its own ESP directory under build/$CONFIG/tests/<case>/
-# from the built loader, test kernel and self-test module, boots it headless
-# in QEMU + OVMF, and checks the exit status and the serial log:
-#
-#   exit 33   the test kernel ran and every check passed
-#   exit 35   the test kernel ran and a check failed
-#   other     the kernel never ran. For the cases that expect the loader to
-#             give up, the ESP holds a startup.nsh that powers off from the
-#             UEFI shell, which OVMF starts after the loader returns.
-#
-# Broken kernels are made from the real one, so they track its layout.
 
 set -u
 CONFIG=${CONFIG:-debug}
@@ -32,8 +20,6 @@ done
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
-# esp NAME: a fresh ESP with the loader and the good kernel; prints its
-# EFI/MYBOOT directory for the case to add files to.
 esp() {
     d=$OUT/$1
     mkdir -p "$d/EFI/BOOT" "$d/EFI/MYBOOT"
@@ -42,14 +28,10 @@ esp() {
     echo "$d/EFI/MYBOOT"
 }
 
-# poweroff NAME: shut QEMU down once OVMF falls back to its shell.
 poweroff() {
     printf 'reset -s\r\n' > "$OUT/$1/startup.nsh"
 }
 
-# qemu NAME CONSOLE...: run QEMU on that ESP with the given serial/monitor
-# options; the serial log goes to $OUT/NAME.log. With $DISK set, that disk
-# image is attached as a second disk (read-only).
 DISK=
 qemu() {
     name=$1
@@ -65,17 +47,11 @@ qemu() {
         -display none "$@"
 }
 
-# boot NAME: no keyboard input; sets $code.
 boot() {
     qemu "$1" -serial stdio < /dev/null > "$OUT/$1.log" 2>&1
     code=$?
 }
 
-# keys NAME KEY...: once the menu is on screen, press each KEY (a QEMU
-# 'sendkey' name: up, down, ret, backspace, spc, a, 1, ...) half a second
-# apart on the emulated keyboard, as a person would. Keys pressed earlier
-# would be dropped by the menu. Serial input is not used: QEMU for Windows
-# stalls on escape sequences (arrow keys) read from a stdin pipe.
 keys() {
     log=$OUT/$1.log
     shift
@@ -89,21 +65,17 @@ keys() {
         sleep 0.5
         echo "sendkey $k"
     done
-    # Keep the monitor's stdin open until QEMU exits (then echo fails).
     while sleep 1; do
         echo || break
     done
 }
 
-# boot_keys NAME KEY...: like boot, pressing KEYs at the menu.
 boot_keys() {
     name=$1
     keys "$@" | qemu "$name" -serial "file:$OUT/$name.log" -monitor stdio > /dev/null 2>&1
     code=$?
 }
 
-# run_case NAME: boot it, pressing $KEYS if set. KEYS is cleared after
-# use: a variable assigned in front of a function call stays set in POSIX sh.
 run_case() {
     k=${KEYS:-}
     KEYS=
@@ -115,7 +87,6 @@ run_case() {
     fi
 }
 
-# result NAME OK REASON
 result() {
     if [ "$2" = 1 ]; then
         pass=$((pass + 1))
@@ -128,8 +99,6 @@ result() {
 
 in_log() { tr -d '\r' < "$OUT/$1.log" | grep -aqF -- "$2"; }
 
-# expect_boot NAME [TEXT...]: kernel passed all checks and the log has each
-# TEXT. With $KEYS set (space-separated sendkey names), they are pressed at the menu.
 expect_boot() {
     name=$1
     shift
@@ -144,7 +113,6 @@ expect_boot() {
     result "$name" 1
 }
 
-# expect_refusal NAME TEXT: the loader printed TEXT and the kernel never ran.
 expect_refusal() {
     poweroff "$1"
     boot "$1"
@@ -157,7 +125,6 @@ expect_refusal() {
     fi
 }
 
-# Byte offset of the first PT_LOAD program header in an ELF64 file.
 first_load() {
     phoff=$(od -An -t u8 -j 32 -N 8 "$1" | tr -d ' ')
     phnum=$(od -An -t u2 -j 56 -N 2 "$1" | tr -d ' ')
@@ -172,7 +139,6 @@ first_load() {
     done
 }
 
-# poke64 FILE OFFSET VALUE: overwrite a little-endian u64 in place.
 poke64() {
     v=$3
     bytes=
@@ -185,8 +151,6 @@ poke64() {
 
 echo "MYBOOT scenarios, $CONFIG build"
 
-# The shipped configuration (BOOT.CFG with a module), with the timeout cut
-# to 1 s so the menu and its countdown run without slowing the suite.
 d=$(esp shipped)
 sed 's/^timeout .*/timeout 1/' kernel/boot.cfg > "$d/BOOT.CFG"
 cp "$MODULE" "$d/SELFTEST.MOD"
@@ -200,11 +164,9 @@ expect_boot shipped "MYBOOT boot menu" "boot entry     : 1 (Test kernel with sel
     "Read configuration \\EFI\\MYBOOT\\BOOT.CFG (2 entries)" \
     "Finished self-test: 42 checks passed, 0 failed"
 
-# No BOOT.CFG: the built-in default entry, no modules.
 esp no-config > /dev/null
 expect_boot no-config "boot entry     : none (no BOOT.CFG)" "modules        : 0"
 
-# default selects the second entry; relative and absolute paths, '/' separators.
 d=$(esp default-entry)
 cat > "$d/BOOT.CFG" <<'EOF'
 default 2
@@ -220,7 +182,6 @@ EOF
 cp "$MODULE" "$d/SELFTEST.MOD"
 expect_boot default-entry "boot entry     : 2 (second)" "\\EFI\\MYBOOT\\SELFTEST.MOD at"
 
-# Fallback: the first entry's kernel is missing, the second boots.
 d=$(esp fallback-kernel)
 cat > "$d/BOOT.CFG" <<'EOF'
 entry missing kernel
@@ -233,8 +194,6 @@ expect_boot fallback-kernel "cannot open kernel: \\EFI\\MYBOOT\\MISSING.ELF" \
     "Loading kernel \\EFI\\MYBOOT\\MISSING.ELF" \
     "Falling back to entry 2: 'good'" "boot entry     : 2 (good)"
 
-# Fallback: the first entry's module is missing; its kernel must be freed
-# and the second entry loads cleanly.
 d=$(esp fallback-module)
 cat > "$d/BOOT.CFG" <<'EOF'
 entry missing module
@@ -249,8 +208,6 @@ EOF
 cp "$MODULE" "$d/SELFTEST.MOD"
 expect_boot fallback-module "cannot open module: \\EFI\\MYBOOT\\NOPE.MOD" "boot entry     : 2 (good)"
 
-# Config errors are reported with line numbers and do not stop the boot.
-# Five errors: the first four are shown, the fifth (line 8) is counted.
 d=$(esp config-errors)
 cat > "$d/BOOT.CFG" <<'EOF'
 timeout soon
@@ -267,13 +224,10 @@ expect_boot config-errors "BOOT.CFG line 1: timeout needs a number of seconds" \
     "BOOT.CFG line 3: entry has no kernel, linux or efi line" "BOOT.CFG: 1 more error(s) not shown" \
     "boot entry     : 1 (good)"
 
-# A BOOT.CFG with no usable entry falls back to the built-in default.
 d=$(esp config-empty)
 printf '# nothing here\n' > "$d/BOOT.CFG"
 expect_boot config-empty "BOOT.CFG has no usable entry" "boot entry     : none (no BOOT.CFG)"
 
-# Interactive menu. The long timeout only matters if a key is lost: the
-# default (entry 1) then boots and the case fails on the entry check.
 two_entries() {
     cat > "$1/BOOT.CFG" <<'EOF'
 timeout 30
@@ -294,14 +248,11 @@ d=$(esp menu-digit)
 two_entries "$d"
 KEYS='2' expect_boot menu-digit "boot entry     : 2 (second)"
 
-# Edit the command line "modules=0": Backspace, retype and append, boot.
 d=$(esp menu-edit)
 two_entries "$d"
 KEYS='e backspace 0 spc e d i t e d ret' expect_boot menu-edit \
     "cmdline        : modules=0 edited" "boot entry     : 1 (first)"
 
-# The menu over a background picture: move, open the editor and leave it
-# (the picture is drawn again), boot the selection.
 d=$(esp menu-background)
 two_entries "$d"
 echo "background BG.JPG" >> "$d/BOOT.CFG"
@@ -309,8 +260,6 @@ cp kernel/background.jpg "$d/BG.JPG"
 KEYS='down e esc ret' expect_boot menu-background \
     "Loaded menu background \\EFI\\MYBOOT\\BG.JPG (" "boot entry     : 2 (second)"
 
-# A background that cannot be used is reported, the text menu lists it,
-# and the boot goes on.
 bad_background() {
     printf 'timeout 1\nbackground BG.JPG\nentry good\nkernel KERNEL.ELF\ncmdline modules=0\n' \
         > "$1/BOOT.CFG"
@@ -327,8 +276,6 @@ cp "$MODULE" "$d/BG.JPG"
 expect_boot background-not-jpeg "MYBOOT boot menu" \
     "cannot use the menu background: not a JPEG file" "boot entry     : 1 (good)"
 
-# Recovery screen: every entry fails; Up twice from the first entry wraps
-# to "Power off" (above "Return to firmware"), which must shut QEMU down.
 d=$(esp recovery-poweroff)
 cat > "$d/BOOT.CFG" <<'EOF'
 entry a
@@ -347,7 +294,6 @@ else
     result recovery-poweroff 1
 fi
 
-# "Return to firmware" from the normal menu: Up from the first entry.
 d=$(esp menu-return)
 two_entries "$d"
 poweroff menu-return
@@ -360,9 +306,6 @@ else
     result menu-return 1
 fi
 
-# Chainloading an EFI program (tests/efi/chaintest.c): it must receive the
-# command line as load options and its volume as DeviceHandle, then ends
-# QEMU with status 67.
 CHAINTEST=${CHAINTEST:-build/$CONFIG/chaintest/CHAINTEST.EFI}
 expect_chain() {
     name=$1
@@ -390,8 +333,6 @@ expect_chain chain-efi "Loaded EFI program \\EFI\\TEST\\CHAINTEST.EFI (" \
     "Starting EFI program ..." "chaintest: running, load options: hello from myboot" \
     "chaintest: device handle set"
 
-# A program that returns: no fallback to the next entry (that would boot a
-# different system behind the user's back); the recovery screen appears.
 d=$(esp chain-return)
 mkdir -p "$OUT/chain-return/EFI/TEST"
 cp "$CHAINTEST" "$OUT/chain-return/EFI/TEST/CHAINTEST.EFI"
@@ -404,7 +345,6 @@ kernel KERNEL.ELF
 EOF
 expect_refusal chain-return "the EFI program returned to the loader"
 
-# Windows Boot Manager is found on its own and listed after the entries.
 d=$(esp windows-detect)
 mkdir -p "$OUT/windows-detect/EFI/Microsoft/Boot"
 cp "$CHAINTEST" "$OUT/windows-detect/EFI/Microsoft/Boot/bootmgfw.efi"
@@ -412,7 +352,6 @@ two_entries "$d"
 KEYS='3' expect_chain windows-detect "Booting 'Windows Boot Manager'" \
     "Loaded EFI program \\EFI\\Microsoft\\Boot\\bootmgfw.efi ("
 
-# auto_windows no: not listed; '3' then means nothing and Enter boots entry 1.
 d=$(esp windows-off)
 mkdir -p "$OUT/windows-off/EFI/Microsoft/Boot"
 cp "$CHAINTEST" "$OUT/windows-off/EFI/Microsoft/Boot/bootmgfw.efi"
@@ -429,10 +368,6 @@ else
     result windows-off 1
 fi
 
-# Linux through its EFI stub, with an initrd over LoadFile2. Needs a real
-# kernel (default: the WSL one); its /init may fail outside its own
-# environment, so success is the kernel unpacking our initrd and running
-# /init. panic=-1 then ends QEMU.
 if [ -f "${LINUX_KERNEL:-}" ] && [ -f "${LINUX_INITRD:-}" ]; then
     d=$(esp linux)
     cp "$LINUX_KERNEL" "$d/VMLINUZ"
@@ -462,9 +397,6 @@ else
     echo "SKIP  linux: set LINUX_KERNEL and LINUX_INITRD to an EFI-stub kernel and initrd"
 fi
 
-# Files on ext2/3/4 partitions of a second disk, written by
-# tests/tools/mkext4.py: GPT + ext4 with fragmented files (extent index
-# nodes) and a symlinked kernel, MBR + ext2 with block maps and meta_bg.
 PYTHON=${PYTHON:-python}
 EXT4_IMG=$OUT/ext4-disk.img
 EXT2_IMG=$OUT/ext2-disk.img
@@ -476,7 +408,6 @@ if [ -f "${LINUX_KERNEL:-}" ] && [ -f "${LINUX_INITRD:-}" ]; then
     linux_files=yes
     set -- "/boot/vmlinuz=$LINUX_KERNEL" "/boot/initrd.img=$LINUX_INITRD"
 fi
-# MSYS_NO_PATHCONV: Git Bash would otherwise turn "/boot/..." into Windows paths.
 MSYS_NO_PATHCONV=1 "$PYTHON" tests/tools/mkext4.py "$EXT4_IMG" --wrap gpt --fragment 3 \
     --label myboot-ext4 --uuid "$EXT4_UUID" --partuuid "$EXT4_PARTUUID" \
     /boot/kernel.elf="$KERNEL" /boot/selftest.mod="$MODULE" "$@" \
@@ -512,8 +443,6 @@ DISK=$EXT2_IMG expect_boot ext2-partuuid \
     "Loaded kernel /boot/kernel.elf (" "Finished self-test: 42 checks passed, 0 failed"
 DISK=
 
-# An entry whose volume is missing falls back, and so does one whose file
-# is missing (names are case-sensitive on ext4); the third is found by UUID.
 d=$(esp volume-fallback)
 cat > "$d/BOOT.CFG" <<EOF
 entry Missing disk
@@ -532,7 +461,6 @@ DISK=$EXT4_IMG expect_boot volume-fallback \
     "cannot open kernel: /boot/KERNEL.ELF (not found)" "boot entry     : 3 (Found by uuid)"
 DISK=
 
-# Linux, its initrd and both read from ext4, split into many extents.
 if [ -n "$linux_files" ]; then
     d=$(esp ext4-linux)
     cat > "$d/BOOT.CFG" <<EOF
@@ -560,7 +488,6 @@ else
     echo "SKIP  ext4-linux: set LINUX_KERNEL and LINUX_INITRD"
 fi
 
-# Broken kernels: the loader must refuse each one with a precise message.
 esp missing-kernel > /dev/null
 rm "$OUT/missing-kernel/EFI/MYBOOT/KERNEL.ELF"
 expect_refusal missing-kernel "cannot open kernel: \\EFI\\MYBOOT\\KERNEL.ELF"
@@ -581,7 +508,6 @@ d=$(esp low-address)
 poke64 "$d/KERNEL.ELF" $(($(first_load "$KERNEL") + 16)) $((0x400000))
 expect_refusal low-address "invalid kernel: segment below 0xFFFFFFFF80000000"
 
-# Every entry broken: the loader gives up and returns to the firmware.
 d=$(esp all-entries-fail)
 cat > "$d/BOOT.CFG" <<'EOF'
 entry a

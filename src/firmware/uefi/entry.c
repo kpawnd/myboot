@@ -1,22 +1,3 @@
-/*
- * UEFI boot sequence: firmware entry -> discovery -> BOOT.CFG and menu ->
- * kernel and modules -> page tables -> ExitBootServices -> kernel.
- *
- * The firmware has already loaded this PE32+ image, applied its base
- * relocations, and called efi_main in 64-bit long mode with paging
- * enabled (memory identity-mapped), interrupts enabled and a firmware
- * stack of at least 128 KiB (UEFI spec 2.3.4, x64 platforms).
- * There is no C runtime: efi_main is the PE entry point.
- *
- * Allocations (all EfiLoaderData, all tracked in S for cleanup on error):
- *   raw memory-map buffer   (discover_memory)
- *   kernel image            (load_kernel)
- *   one block per module    (load_module)
- *   handoff arena           (prepare_handoff)
- * If an entry fails to load, its kernel and modules are freed and the next
- * entry is tried; only when every entry fails does control return to the
- * firmware.
- */
 #include <stddef.h>
 #include <stdint.h>
 #include "core/config.h"
@@ -29,22 +10,21 @@
 #include "firmware/uefi_console.h"
 #include "boot_state.h"
 
-#define CMDLINE_MAX      CFG_CMDLINE_MAX /* UTF-16 chars accepted from LoadOptions */
+#define CMDLINE_MAX      CFG_CMDLINE_MAX
 #define CONFIG_MAX       KiB(16)
-#define MODULE_MAX       GiB(16)         /* sanity bound on a module file */
+#define MODULE_MAX       GiB(16)
 #define EBS_MAX_ATTEMPTS 3
-#define FAIL_DELAY_US    3000000         /* keep an error on screen before firmware moves on */
+#define FAIL_DELAY_US    3000000
 #define TSC_CAL_US       2000
-#define HHDM_MAX         (1ull << 46)    /* 64 TiB: keeps the HHDM clear of the kernel's PML4 slot */
+#define HHDM_MAX         (1ull << 46)
 #define LOW_HALF_END     (1ull << 47)
 
-/* Progress squares after ExitBootServices (see stage()) */
 enum {
-    STAGE_EXITED = 1, /* firmware gone, memory map final */
-    STAGE_CPU_STATE,  /* CR0, CR4, XCR0 */
+    STAGE_EXITED = 1,
+    STAGE_CPU_STATE,
     STAGE_PAT,
-    STAGE_SMP,        /* + SMP_STAGE_*: APIC read, INIT sent, 10 ms passed, SIPI, SIPI */
-    STAGE_HANDOFF = STAGE_SMP + SMP_STAGE_SIPI2 + 1 /* APs settled, jumping to the kernel */
+    STAGE_SMP,
+    STAGE_HANDOFF = STAGE_SMP + SMP_STAGE_SIPI2 + 1
 };
 
 struct uefi_ctx g_uefi;
@@ -53,17 +33,16 @@ uint64_t g_prof[PROF_COUNT];
 #endif
 
 static struct boot_state S;
-static uint8_t g_hdr_buf[4096];          /* ELF + program headers; loader scratch */
-static char g_cfg_text[CONFIG_MAX + 1];  /* BOOT.CFG; parsed in place */
+static uint8_t g_hdr_buf[4096];
+static char g_cfg_text[CONFIG_MAX + 1];
 static struct boot_config g_cfg;
-static char g_load_options[CMDLINE_MAX]; /* LoadOptions as ASCII, without BOOT.CFG */
+static char g_load_options[CMDLINE_MAX];
 
 struct __attribute__((packed)) gdtr {
     uint16_t limit;
     uint64_t base;
 };
 
-/* src/arch/x86_64/handoff.S */
 extern void boot_handoff(uint64_t cr3, uint64_t gdtr_virt, uint64_t stack_top,
                          uint64_t bootinfo_virt, uint64_t entry) __attribute__((noreturn));
 
@@ -73,7 +52,6 @@ static int system_table_valid(const EFI_SYSTEM_TABLE *st)
 
     if (st == NULL || st->Hdr.Signature != EFI_SYSTEM_TABLE_SIGNATURE)
         return 0;
-    /* HeaderSize covers the whole table; it must reach every field we read. */
     if (st->Hdr.HeaderSize < offsetof(EFI_SYSTEM_TABLE, ConfigurationTable) + sizeof(void *))
         return 0;
     if (!st->ConOut || !(bs = st->BootServices) || bs->Hdr.Signature != EFI_BOOT_SERVICES_SIGNATURE)
@@ -87,7 +65,6 @@ static EFI_STATUS entry_error(const CHAR16 *what, const char *detail, EFI_STATUS
     return status;
 }
 
-/* Undo load_entry, so the next entry starts from a clean state. */
 static void release_entry(void)
 {
     kfile_close(&S.kf);
@@ -114,9 +91,6 @@ static void release_resources(void)
     S.tramp_page = 0;
 }
 
-/* Every fatal failure before ExitBootServices ends here: all our memory
- * released, and control returned to the firmware so its boot manager can
- * try the next boot option. */
 static EFI_STATUS fail(const CHAR16 *what, const char *detail, EFI_STATUS status)
 {
     boot_error(what, detail, status);
@@ -125,9 +99,6 @@ static EFI_STATUS fail(const CHAR16 *what, const char *detail, EFI_STATUS status
     return status;
 }
 
-/* Only reached when CPUID gives no TSC frequency (AMD, most VMs). Costs
- * TSC_CAL_US of wall time: profiling builds pay it at startup, the rest
- * only when AP startup needs a clock after ExitBootServices. */
 static void calibrate_tsc(void)
 {
     uint64_t t0 = rdtsc();
@@ -135,8 +106,6 @@ static void calibrate_tsc(void)
     cpu_set_tsc_hz((rdtsc() - t0) * (1000000 / TSC_CAL_US), BOOT_TSC_CALIBRATED);
 }
 
-/* LoadOptions become the kernel command line only if they are plain
- * printable ASCII in UTF-16: boot managers often pass binary data there. */
 static uint32_t load_options_cmdline(void)
 {
     const CHAR16 *s = g_uefi.li->LoadOptions;
@@ -161,9 +130,6 @@ static void report_config_errors(void)
         boot_error_more("BOOT.CFG", g_cfg.nerrors - CFG_MAX_ERRORS);
 }
 
-/* BOOT.CFG is optional. Without a usable one the loader boots
- * DEFAULT_KERNEL with the firmware load options as command line, which is
- * how a firmware boot entry (efibootmgr, bcdedit) passes arguments. */
 static void load_config(void)
 {
     struct kfile f = {0};
@@ -217,12 +183,6 @@ static void load_config(void)
         e->cmdline = g_load_options;
 }
 
-/*
- * Read headers (1 read), validate, allocate one physically contiguous block
- * for the whole image, then read each PT_LOAD straight into its final place
- * (1 read per segment, no intermediate buffer). Every byte of the block is
- * written exactly once: either file data or zero (BSS, gaps, page tails).
- */
 static EFI_STATUS load_kernel(struct uefi_vol *vol, const char *path)
 {
     EFI_BOOT_SERVICES *bs = g_uefi.bs;
@@ -240,12 +200,10 @@ static EFI_STATUS load_kernel(struct uefi_vol *vol, const char *path)
     if (EFI_ERROR(s = kfile_read(&S.kf, 0, g_hdr_buf, hdr_len)))
         return entry_error(L"kernel read failed", S.kpath, s);
     if ((e = elf_parse(g_hdr_buf, hdr_len, S.kf.size, &S.elf)) != ELF_OK) {
-        boot_error(L"invalid kernel", elf_strerror(e), 0); /* the reason says it all */
+        boot_error(L"invalid kernel", elf_strerror(e), 0);
         return EFI_LOAD_ERROR;
     }
 
-    /* Over-allocate by (align - 4 KiB) so a block with the right physical
-     * alignment exists inside, then give back the unused head and tail. */
     span = S.elf.vend - S.elf.vbase;
     pages = span / PAGE_SIZE + (S.elf.align / PAGE_SIZE - 1);
     if (EFI_ERROR(s = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, pages, &addr)))
@@ -275,7 +233,6 @@ static EFI_STATUS load_kernel(struct uefi_vol *vol, const char *path)
     return EFI_SUCCESS;
 }
 
-/* The whole file in one read, straight into its own page allocation. */
 static EFI_STATUS load_module(struct uefi_vol *vol, const struct cfg_module *m)
 {
     struct loaded_module *lm = &S.mods[S.nmod];
@@ -306,7 +263,7 @@ static EFI_STATUS load_module(struct uefi_vol *vol, const struct cfg_module *m)
         }
         lm->phys = addr;
     }
-    S.nmod++; /* owned by S from here: release_entry frees it */
+    S.nmod++;
     s = lm->size ? kfile_read(&f, 0, (void *)(uintptr_t)lm->phys, lm->size) : EFI_SUCCESS;
     kfile_close(&f);
     if (EFI_ERROR(s))
@@ -317,16 +274,11 @@ static EFI_STATUS load_module(struct uefi_vol *vol, const struct cfg_module *m)
     return EFI_SUCCESS;
 }
 
-/* Entries found on disk rather than in BOOT.CFG. Needs every volume opened,
- * so the menu calls it only when it is about to be shown. */
 static void add_auto_entries(void)
 {
     chain_add_windows(&g_cfg);
 }
 
-/* MYBOOT-protocol entries are loaded here and started by efi_main. Linux
- * and EFI entries are started by chain_boot, which returns only if that
- * failed; `started` then says whether the program ran and came back. */
 static EFI_STATUS load_entry(uint32_t idx, const char *cmdline, uint32_t cmdline_len, bool *started)
 {
     struct cfg_entry *e = &g_cfg.entry[idx];
@@ -353,11 +305,6 @@ static EFI_STATUS load_entry(uint32_t idx, const char *cmdline, uint32_t cmdline
     return EFI_SUCCESS;
 }
 
-/* The chosen entry (with its command line as edited at the menu), then
- * every other entry in order. Stops at the first that loads, or at a
- * chainloaded program that ran and returned: falling back to a different
- * system after that would surprise the user, so the recovery screen
- * decides instead. */
 static EFI_STATUS load_entries(const struct menu_choice *c)
 {
     EFI_STATUS s = EFI_LOAD_ERROR;
@@ -395,7 +342,6 @@ static void copy_vendor(char *dst, size_t cap, const CHAR16 *src)
         dst[i] = (src[i] >= 0x20 && src[i] < 0x7F) ? (char)src[i] : '?';
 }
 
-/* dst is zeroed by the caller; at most cap - 1 bytes are copied. */
 static void copy_ascii(char *dst, size_t cap, const char *src)
 {
     for (size_t i = 0; i + 1 < cap && src[i]; i++)
@@ -416,7 +362,6 @@ static bool map_kernel(void)
     return true;
 }
 
-/* Kernel and module ranges, sorted by base, for uefi_mmap_normalize. */
 static void build_carves(void)
 {
     S.carve[0] = (struct mmap_carve){S.kphys, S.kphys + S.kpages * PAGE_SIZE, BOOT_MEM_KERNEL};
@@ -486,14 +431,13 @@ static void fill_boot_info(struct boot_info *bi, const char *cmdline, uint64_t t
     bi->modules = S.nmod ? (uintptr_t)S.bmods : 0;
     bi->module_count = S.nmod;
     bi->module_entry_size = sizeof(struct boot_module);
-    bi->efi_mmap = (uintptr_t)S.mem->map.buf; /* size fields: after the final read */
+    bi->efi_mmap = (uintptr_t)S.mem->map.buf;
     if (S.have_cfg) {
         bi->boot_entry = S.entry + 1;
         copy_ascii(bi->boot_entry_title, sizeof(bi->boot_entry_title), g_cfg.entry[S.entry].title);
     }
 }
 
-/* `word` as a whole space-separated word of the kernel command line. */
 static bool cmdline_has(const char *word)
 {
     size_t n = 0;
@@ -508,7 +452,6 @@ static bool cmdline_has(const char *word)
     return false;
 }
 
-/* N of "key=N" (key including the '=') in the command line, or 0. */
 static uint32_t cmdline_uint(const char *key)
 {
     size_t n = 0;
@@ -525,9 +468,6 @@ static uint32_t cmdline_uint(const char *key)
     return 0;
 }
 
-/* The loader's own IDT from ExitBootServices to the handoff: an NMI, a
- * machine check (broadcast to every CPU) or a fault now shows as a row of
- * red squares, vector + 1 of them, instead of a silent hang. */
 struct __attribute__((packed)) idt_gate {
     uint16_t off0, sel;
     uint8_t  ist, type;
@@ -535,7 +475,7 @@ struct __attribute__((packed)) idt_gate {
     uint32_t off2, zero;
 };
 static struct idt_gate g_idt[32];
-extern const uint8_t exc_stubs[]; /* exc.S */
+extern const uint8_t exc_stubs[];
 __attribute__((noreturn)) void exc_report(uint32_t vec);
 
 static void install_idt(void)
@@ -556,10 +496,6 @@ static void install_idt(void)
 }
 
 #if BOOT_LOG
-/* After ExitBootServices nothing can print, so progress shows as squares
- * in the top-left corner: one per step (green), then a row with one per
- * CPU (green: running or parked, red: did not start). The kernel paints
- * over them; if the boot stops, they say where. */
 static void fb_square(uint32_t x, uint32_t y, uint32_t size, bool good)
 {
     const struct boot_framebuffer *fb = S.fb;
@@ -579,14 +515,11 @@ static void fb_square(uint32_t x, uint32_t y, uint32_t size, bool good)
     }
 }
 
-/* SFENCE: the framebuffer may be write-combining now; a square must be
- * on screen before whatever comes next can stop the CPU. */
 static void stage(int n)
 {
     fb_square(16 + (uint32_t)(n - 1) * 40, 16, 32, true);
     __asm__ volatile("sfence" : : : "memory");
 }
-/* Heartbeat ticks (one per ms of waiting) are a thin bar under the squares. */
 static void smp_stage(int n)
 {
     if (n >= SMP_STAGE_TICK) {
@@ -597,8 +530,6 @@ static void smp_stage(int n)
     }
 }
 
-/* The per-CPU row, then three rows counting the APs that reached the
- * trampoline's 16-, 32- and 64-bit code. */
 static void show_cpus(void)
 {
     uint32_t seen[3];
@@ -633,9 +564,6 @@ void exc_report(uint32_t vec)
 }
 #endif
 
-/* Linux's rule (arch/x86/kernel/smpboot.c): Intel family 6 from model 0x0F
- * (Core 2) and later families, and AMD from family 0x10, need no wait after
- * INIT; older CPUs get the SDM's 10 ms. */
 static uint32_t init_delay_us(void)
 {
     const struct boot_cpu *c = S.cpu;
@@ -646,9 +574,6 @@ static uint32_t init_delay_us(void)
     return 10000;
 }
 
-/* What every CPU runs the kernel with: SSE on, and XSAVE with x87, SSE,
- * AVX and AVX-512 where the CPU has them (CPUID 0Dh: what XCR0 may hold).
- * Applied after ExitBootServices, so firmware never sees it. */
 static void plan_cpu_state(void)
 {
     uint32_t r[4];
@@ -670,13 +595,10 @@ static void plan_cpu_state(void)
     }
 }
 
-/* The AP list in the arena, and the trampoline in a page below 1 MiB.
- * Without the page (low memory taken) or a table root below 4 GiB, the
- * APs stay as firmware left them and the list says so. */
 static void plan_smp(uint8_t *stacks, uint64_t gdtr_base, uint16_t gdtr_limit)
 {
     struct smp_tramp_params p;
-    EFI_PHYSICAL_ADDRESS page = 0x9F000; /* below the EBDA and VGA holes */
+    EFI_PHYSICAL_ADDRESS page = 0x9F000;
 
     for (uint32_t i = 0; i < S.smp_count; i++) {
         struct boot_smp_cpu *c = &S.smp_cpus[i];
@@ -709,13 +631,6 @@ static void plan_smp(uint8_t *stacks, uint64_t gdtr_base, uint16_t gdtr_limit)
     smp_tramp_install(page, &p);
 }
 
-/*
- * One allocation holds everything the kernel receives. Its size is computed
- * up front from upper bounds, so nothing is reallocated:
- *   page tables | 64 KiB stack | boot_info | GDT | modules | memory map |
- *   cmdline | log | CPU list | AP stacks
- * It is placed below 4 GiB when possible: APs load CR3 in 32-bit mode.
- */
 static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
 {
     uint64_t span = S.elf.vend - S.elf.vbase;
@@ -736,9 +651,6 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     if (trampoline + 2 * PAGE_SIZE > LOW_HALF_END)
         return fail(L"loader image above the low canonical half", NULL, EFI_UNSUPPORTED);
 
-    /* The framebuffer usually sits in the MMIO hole above RAM (Hyper-V:
-     * 0xF8000000 with 1 GiB of RAM), outside the HHDM. Map the part beyond
-     * hhdm_size at the same HHDM offset so "phys + hhdm_base" works for it. */
     if (S.fb->base) {
         fb_lo = align_down(S.fb->base, PAGE_SIZE);
         fb_hi = align_up(S.fb->base + S.fb->size, PAGE_SIZE);
@@ -752,12 +664,11 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     build_carves();
     plan_cpu_state();
     if (!S.cpu->tsc_hz && S.smp->count > 1)
-        calibrate_tsc(); /* AP startup times its waits with the TSC */
+        calibrate_tsc();
     S.smp_count = S.smp->count;
     S.nosmp = cmdline_has("nosmp");
     S.smpstop = (uint16_t)cmdline_uint("smpstop=");
     S.pt_bound = pt_pages_bound(span, S.hhdm_size, S.hhdm_1g, S.la57, fb_hi - fb_lo);
-    /* Each carve can split one entry into three; +2 margin. */
     S.mmap_cap = uefi_mmap_capacity(&S.mem->map) + 2 * S.ncarve + 2;
     size = (uint64_t)S.pt_bound * PAGE_SIZE + KERNEL_STACK_SIZE + sizeof(struct boot_info) + 64 +
            (uint64_t)S.nmod * sizeof(struct boot_module) + 16 +
@@ -785,7 +696,7 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     cmdline = arena_alloc(&S.arena, S.cmdline_len + 1, 1);
     S.log = arena_alloc(&S.arena, CON_LOG_MAX, 8);
     S.smp_cpus = arena_alloc(&S.arena, (uint64_t)S.smp_count * sizeof(struct boot_smp_cpu), 64);
-    if (S.smp_count > 1) /* one stack per AP; the last slot is spare */
+    if (S.smp_count > 1)
         ap_stacks = arena_alloc(&S.arena, (uint64_t)S.smp_count * SMP_AP_STACK_SIZE, PAGE_SIZE);
     if (!pool || !stack || !S.bi || !gdt || !gdtr || !S.bmods || !S.mmap || !cmdline || !S.log ||
         (S.smp_count && !S.smp_cpus) || (S.smp_count > 1 && !ap_stacks))
@@ -799,15 +710,13 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
         return fail(L"page table construction failed", NULL, EFI_OUT_OF_RESOURCES);
 
     gdt[0] = 0;
-    gdt[1] = 0x00AF9A000000FFFFull; /* 0x08: present, DPL0, code, L=1 (64-bit) */
-    gdt[2] = 0x00CF92000000FFFFull; /* 0x10: present, DPL0, data, writable */
+    gdt[1] = 0x00AF9A000000FFFFull;
+    gdt[2] = 0x00CF92000000FFFFull;
     gdtr->limit = 3 * sizeof(uint64_t) - 1;
     gdtr->base = BOOT_HHDM_BASE + (uintptr_t)gdt;
     S.gdtr_virt = BOOT_HHDM_BASE + (uintptr_t)gdtr;
     S.stack_top_virt = BOOT_HHDM_BASE + (uintptr_t)stack + KERNEL_STACK_SIZE;
 
-    /* After the page tables: the trampoline page joins them. Entry i's
-     * stack is [(i - 1), i) * SMP_AP_STACK_SIZE into ap_stacks. */
     plan_smp(ap_stacks, gdtr->base, gdtr->limit);
     if (S.tramp_page && !pt_map(&S.pt, S.tramp_page, S.tramp_page, PAGE_SIZE, PT_W | PT_X, PAGE_SIZE))
         return fail(L"page table construction failed", NULL, EFI_OUT_OF_RESOURCES);
@@ -820,9 +729,6 @@ static EFI_STATUS prepare_handoff(uint64_t tsc_entry)
     return EFI_SUCCESS;
 }
 
-/* Final memory map and ExitBootServices with no allocation in between.
- * EFI_INVALID_PARAMETER means the map changed (a firmware event allocated
- * memory) after our read: read again into the same buffer and retry. */
 static EFI_STATUS exit_firmware(void)
 {
     EFI_STATUS s = EFI_LOAD_ERROR;
@@ -840,14 +746,11 @@ static EFI_STATUS exit_firmware(void)
 
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
-    /* First instruction of our code: the reference point for all timings. */
     uint64_t tsc_entry = rdtsc();
     EFI_STATUS s = EFI_LOAD_ERROR;
     struct menu_choice choice;
     uint32_t n;
 
-    /* Without a valid table there is no console to report on: hand the
-     * failure back to the firmware boot manager. */
     if (!system_table_valid(st))
         return EFI_LOAD_ERROR;
     g_uefi.image = image;
@@ -891,8 +794,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     menu_choose(&g_cfg, &choice, add_auto_entries);
     PROF_MARK(PROF_CONFIG);
 
-    /* Until an entry loads: the chosen one, then the others in order as
-     * fallbacks; if all fail, the recovery screen picks again or gives up. */
     while (choice.action == MENU_BOOT && EFI_ERROR(s = load_entries(&choice))) {
         menu_recover(&g_cfg, &choice, add_auto_entries);
         boot_errors_clear();
@@ -909,7 +810,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 #if BOOT_LOG
     report_handoff(&S);
 #endif
-    blog_str("Starting kernel ..."); /* the last output before firmware exits */
+    blog_str("Starting kernel ...");
     blog_end(TAG_INFO);
     {
         uint32_t len;
@@ -923,8 +824,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (EFI_ERROR(s = exit_firmware()))
         return s;
 
-    /* Firmware is gone: no console, no allocation, nothing may fail. The
-     * firmware IDT lives in memory we just told the kernel is free. */
     cpu_cli();
     S.bi->efi_mmap_size = S.mem->map.size;
     S.bi->efi_mmap_desc_size = (uint32_t)S.mem->map.desc_size;
@@ -934,19 +833,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     install_idt();
     stage(STAGE_EXITED);
     if (S.nx)
-        wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_NXE); /* before NX bits become live */
-    write_cr0(S.cr0);                                /* WP: kernel R/O pages are R/O to CPL0 too; SSE */
+        wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_NXE);
+    write_cr0(S.cr0);
     write_cr4(S.cr4);
     if (S.xcr0) {
         uint32_t r[4];
 
         xsetbv0(S.xcr0);
-        cpuid(0x0D, 0, r); /* EBX: XSAVE area size for the XCR0 just set */
+        cpuid(0x0D, 0, r);
         S.bi->xsave_size = r[1];
     }
     stage(STAGE_CPU_STATE);
-    /* PWT-only PTEs exist only in the kernel's tables, which are not live
-     * yet; flush anything cached under the old meaning anyway. */
     wbinvd();
     wrmsr(MSR_PAT, PAT_LINUX);
     stage(STAGE_PAT);
@@ -958,9 +855,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
             smp_start_aps(S.tramp_page, S.smp_cpus, S.smp_count, S.cpu->tsc_hz, init_delay_us(), &x2apic, &self,
                           smp_stage);
         S.bi->smp_flags = x2apic ? BOOT_SMP_F_X2APIC : 0;
-        S.smp_cpus[0].apic_id = self; /* what the BSP's local APIC says, if CPUID disagreed */
+        S.smp_cpus[0].apic_id = self;
         show_cpus();
-        if (S.smpstop) /* time to read the rows before the kernel paints over them */
+        if (S.smpstop)
             for (uint64_t t0 = rdtsc(); rdtsc() - t0 < 5 * S.cpu->tsc_hz;)
                 __asm__ volatile("pause");
     }

@@ -1,18 +1,3 @@
-/*
- * Volumes: every partition the firmware exposes through Block I/O (and
- * every unpartitioned disk with a filesystem), probed once for what the
- * loader can read on it:
- *
- *   ext2/3/4   our own driver (src/fs/ext4.c) over the firmware's Disk I/O
- *   FAT        the firmware's Simple File System; we only read the volume
- *              serial and label from its boot sector, for matching
- *   other      whatever else a firmware driver offers Simple File System on
- *
- * BOOT.CFG names a volume as uuid=, partuuid= or label=, the identifiers
- * Linux tools (blkid, lsblk, /etc/fstab) show. Scanning opens every disk,
- * so it happens only when an entry names a volume or the menu looks for
- * Windows; booting from the loader's own volume never scans.
- */
 #include "firmware/uefi_boot.h"
 #include "core/util.h"
 #include "lib/mem.h"
@@ -28,8 +13,6 @@ static struct uefi_vol g_boot;
 
 static const char g_hex[] = "0123456789abcdef";
 
-/* 16 bytes as xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx, taking byte order[i]
- * as the i-th printed byte. */
 static void id_str(char *out, const uint8_t *b, const uint8_t *order)
 {
     for (uint32_t i = 0; i < 16; i++) {
@@ -58,9 +41,6 @@ static int disk_read(struct blockdev *dev, uint64_t offset, void *dst, uint64_t 
     return EFI_ERROR(v->dio->ReadDisk(v->dio, v->media_id, offset, len, dst)) ? -1 : 0;
 }
 
-/* PARTUUID from the partition's HardDrive device path node (10.3.5.1):
- * the GPT unique partition GUID, or for MBR the disk signature and
- * partition number as Linux prints them ("1234abcd-02"). */
 static void partition_id(struct uefi_vol *v)
 {
     const uint8_t *node;
@@ -86,7 +66,6 @@ static void partition_id(struct uefi_vol *v)
     }
 }
 
-/* Serial and label from a FAT boot sector, as blkid shows them. */
 static void fat_ids(struct uefi_vol *v, const uint8_t *bs)
 {
     uint32_t off, serial, n = 11;
@@ -99,7 +78,7 @@ static void fat_ids(struct uefi_vol *v, const uint8_t *bs)
         off = 39;
     else
         return;
-    if (bs[off - 1] != 0x29) /* extended boot signature: serial and label present */
+    if (bs[off - 1] != 0x29)
         return;
     serial = rd32(bs + off);
     hex_str(v->uuid, serial >> 16, 4, true);
@@ -171,8 +150,6 @@ uint32_t vol_list(struct uefi_vol **out)
         memset(v, 0, sizeof(*v));
         v->handle = h[i];
         probe(v);
-        /* A whole disk counts only if it holds a filesystem itself; a
-         * partitioned disk is listed through its partitions. */
         if (v->fs == VOL_FS_NONE && !v->partuuid[0] && v->fs_err == FS_OK)
             continue;
         g_nvols++;
@@ -181,7 +158,6 @@ uint32_t vol_list(struct uefi_vol **out)
     return g_nvols;
 }
 
-/* Same identifier, ignoring case and dashes. */
 static bool id_eq(const char *have, const char *want)
 {
     for (;;) {

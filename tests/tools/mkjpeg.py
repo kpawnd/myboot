@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-Writes small baseline JPEG test images with the features the loader's
-decoder must handle, independently of it: chroma subsampling, greyscale,
-restart intervals, 16-bit quantisation tables, Huffman codes of every
-length up to 16 bits.
-
-  mkjpeg.py OUT.JPG WIDTH HEIGHT [--sampling HxV] [--grey] [--restart N]
-            [--quality Q] [--q16] [--seed S]
-
---sampling is the luma sampling factor (1x1, 2x1, 1x2, 2x2); chroma is 1x1.
-The picture is a colour gradient with a few hard edges and some noise, so
-every block has AC energy. Huffman tables are built for this picture, with
-long codes on purpose; quantisation tables are synthetic.
-"""
 import argparse
 import math
 import random
@@ -25,7 +11,6 @@ ZIGZAG = [0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
 COS = [[math.cos((2 * x + 1) * u * math.pi / 16) for x in range(8)] for u in range(8)]
 C = [1 / math.sqrt(2)] + [1.0] * 7
 
-
 def picture(w, h, seed):
     rng = random.Random(seed)
     px = []
@@ -35,24 +20,19 @@ def picture(w, h, seed):
             r = 255 * x / max(1, w - 1)
             g = 255 * y / max(1, h - 1)
             b = 128 + 100 * math.sin(x / 5.0) * math.cos(y / 7.0)
-            if (x // 13 + y // 11) % 3 == 0:  # hard edges
+            if (x // 13 + y // 11) % 3 == 0:
                 r, g, b = 255 - g, b, r
             n = rng.uniform(-20, 20)
             row.append(tuple(min(255, max(0, int(v + n))) for v in (r, g, b)))
         px.append(row)
     return px
 
-
 def fdct(block):
-    """8x8 forward DCT (A.3.3) of level-shifted samples, natural order."""
     tmp = [[sum(block[y][x] * COS[u][x] for x in range(8)) for u in range(8)] for y in range(8)]
     return [0.25 * C[u] * C[v] * sum(tmp[y][u] * COS[v][y] for y in range(8))
             for v in range(8) for u in range(8)]
 
-
 def plane(px, w, h, f, sub_x, sub_y, pw, ph):
-    """One component, subsampled by averaging, padded by edge replication
-    to pw x ph samples."""
     out = []
     for y in range(ph):
         row = []
@@ -67,7 +47,6 @@ def plane(px, w, h, f, sub_x, sub_y, pw, ph):
         out.append(row)
     return out
 
-
 def category(v):
     v = abs(v)
     n = 0
@@ -76,14 +55,10 @@ def category(v):
         v >>= 1
     return n
 
-
 def bits_of(v, n):
     return v if v >= 0 else v + (1 << n) - 1
 
-
 def build_table(freq):
-    """Code lengths for the symbols used, most frequent first, growing
-    quickly so long codes occur; Kraft-valid without the all-ones code."""
     syms = sorted(freq, key=lambda s: (-freq[s], s))
     lengths, used, prev = {}, 0, 1
     for i, s in enumerate(syms):
@@ -108,7 +83,6 @@ def build_table(freq):
         code <<= 1
     return counts, order, codes
 
-
 class Bits:
     def __init__(self):
         self.out = bytearray()
@@ -127,8 +101,7 @@ class Bits:
 
     def flush(self):
         if self.n:
-            self.put((1 << (8 - self.n)) - 1, 8 - self.n)  # pad with ones (F.1.2.3)
-
+            self.put((1 << (8 - self.n)) - 1, 8 - self.n)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -151,12 +124,10 @@ def main():
         comps += [(2, 1, 1, 1, lambda r, g, b: -0.168736 * r - 0.331264 * g + 0.5 * b + 128),
                   (3, 1, 1, 1, lambda r, g, b: 0.5 * r - 0.418688 * g - 0.081312 * b + 128)]
     mcux, mcuy = -(-w // (8 * hs)), -(-h // (8 * vs))
-    # quantisers in zigzag order; --q16 makes the coarse ones exceed 255
     qt = [[min(65535 if a.q16 else 255,
                (1 + a.quality * (1 + k // 8 + k % 8) * (1 + t)) * (3 if a.q16 else 1))
            for k in range(64)] for t in range(2)]
 
-    # coefficient blocks per component, in MCU order
     planes = []
     for cid, ch, cv, tq, f in comps:
         planes.append(plane(px, w, h, f, hs // ch, vs // cv, mcux * ch * 8, mcuy * cv * 8))
@@ -178,7 +149,6 @@ def main():
                         mcu.append((ci, block(ci, mx * ch + x, my * cv + y)))
             mcus.append(mcu)
 
-    # symbols: pass 1 counts them, pass 2 writes them
     def symbols(emit):
         pred = [0] * len(comps)
         for i, mcu in enumerate(mcus):
@@ -244,7 +214,7 @@ def main():
     sof = struct.pack(">BHHB", 8, h, w, len(comps))
     for cid, ch, cv, tq, f in comps:
         sof += bytes([cid, ch << 4 | cv, tq])
-    out += seg(0xC1 if a.q16 else 0xC0, sof)  # 16-bit tables need extended sequential
+    out += seg(0xC1 if a.q16 else 0xC0, sof)
     for (kind, cls), (counts, order, codes) in sorted(tables.items()):
         out += seg(0xC4, bytes([(0 if kind == "dc" else 0x10) | cls]) + bytes(counts) + bytes(order))
     if a.restart:
@@ -256,7 +226,6 @@ def main():
     out += seg(0xDA, sos + bytes([0, 63, 0]))
     out += bits.out + b"\xFF\xD9"
     open(a.out, "wb").write(out)
-
 
 if __name__ == "__main__":
     main()
